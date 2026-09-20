@@ -1,0 +1,13 @@
+apiVersion: backup.kubevirt.io/v1alpha1
+kind: VirtualMachineBackup
+metadata:
+  name: fedora-cbt-vm-full
+  namespace: cbt-demo
+spec:
+  source:
+    apiGroup: backup.kubevirt.io
+    kind: VirtualMachineBackupTracker
+    name: fedora-cbt-tracker
+  mode: Push
+  pvcName: cbt-backup-output
+  skipQuiesce: true

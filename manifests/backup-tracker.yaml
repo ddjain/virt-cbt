@@ -1,0 +1,10 @@
+apiVersion: backup.kubevirt.io/v1alpha1
+kind: VirtualMachineBackupTracker
+metadata:
+  name: fedora-cbt-tracker
+  namespace: cbt-demo
+spec:
+  source:
+    apiGroup: kubevirt.io
+    kind: VirtualMachine
+    name: fedora-cbt-vm

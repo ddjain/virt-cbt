@@ -1,0 +1,74 @@
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: fedora-cbt-vm
+  namespace: cbt-demo
+  labels:
+    app: fedora-cbt-vm
+    changedBlockTracking: "true"
+    vm-os: fedora
+spec:
+  runStrategy: Always
+  dataVolumeTemplates:
+  - metadata:
+      name: fedora-cbt-vm-data
+    spec:
+      source:
+        blank: {}
+      pvc:
+        accessModes:
+        - ReadWriteOnce
+        volumeMode: Filesystem
+        resources:
+          requests:
+            storage: 10Gi
+        storageClassName: ocs-storagecluster-ceph-rbd
+  template:
+    metadata:
+      labels:
+        kubevirt.io/vm: fedora-cbt-vm
+        app: fedora-cbt-vm
+    spec:
+      domain:
+        cpu:
+          cores: 1
+        resources:
+          requests:
+            memory: 1Gi
+        devices:
+          disks:
+          - name: containerdisk
+            disk:
+              bus: virtio
+          - name: cloudinitdisk
+            disk:
+              bus: virtio
+          - name: datadisk
+            changedBlockTracking: true
+            disk:
+              bus: virtio
+          interfaces:
+          - name: default
+            masquerade: {}
+      networks:
+      - name: default
+        pod: {}
+      volumes:
+      - name: containerdisk
+        containerDisk:
+          image: quay.io/containerdisks/fedora:41
+      - name: cloudinitdisk
+        cloudInitNoCloud:
+          userData: |
+            #cloud-config
+            user: fedora
+            password: fedora
+            chpasswd:
+              expire: false
+            runcmd:
+            - mkdir -p /data
+            - "if ! blkid /dev/vdc >/dev/null 2>&1; then mkfs.xfs -L data /dev/vdc; fi"
+            - "mount /dev/vdc /data || mount -a"
+      - name: datadisk
+        dataVolume:
+          name: fedora-cbt-vm-data
