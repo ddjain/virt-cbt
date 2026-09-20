@@ -15,7 +15,7 @@ docs/odf/ODF-SETUP.md              ODF deployment and troubleshooting
 docs/cbt/CBT-ARCHITECTURE.md       CBT design and state model
 docs/cbt/CBT-OPERATIONS.md         Components, dependencies, metrics, and runbooks
 docs/cbt/CBT-TEST-GUIDE.md         End-to-end commands and verification
-docs/chaos-test/SCENARIOS.md       Repeatable storage, VM, and CBT scenarios
+docs/chaos-test/scenarios_v2.md      CBT resilience chaos test plan (Scenario V2)
 manifests/fedora-cbt-vm.yaml  Generic ODF-backed Fedora VM
 manifests/backup-pvc.yaml     Backup output PVC
 manifests/backup-tracker.yaml CBT checkpoint tracker
@@ -52,6 +52,6 @@ Read the detailed procedures and operations guide first:
 - `docs/cbt/CBT-ARCHITECTURE.md`
 - `docs/cbt/CBT-OPERATIONS.md`
 - `docs/cbt/CBT-TEST-GUIDE.md`
-- `docs/chaos-test/SCENARIOS.md`
+- `docs/chaos-test/scenarios_v2.md`
 
 The manifests use generic names and the `ocs-storagecluster-ceph-rbd` StorageClass. Change the StorageClass and namespace for the target cluster as needed.
