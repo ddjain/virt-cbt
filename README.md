@@ -6,6 +6,7 @@ Reusable lab manifests and documentation for:
 2. Creating an OpenShift Virtualization Fedora VM on ODF Ceph-RBD.
 3. Enabling and verifying KubeVirt Changed Block Tracking.
 4. Taking full and incremental `VirtualMachineBackup` resources.
+5. Running repeatable storage, VM, backup, timestamp, and troubleshooting scenarios.
 
 ## Repository layout
 
@@ -13,6 +14,7 @@ Reusable lab manifests and documentation for:
 docs/ODF-SETUP.md             ODF deployment and troubleshooting
 docs/CBT-ARCHITECTURE.md      KubeVirt CBT design and state model
 docs/CBT-TEST-GUIDE.md        End-to-end commands and verification
+docs/SCENARIOS.md             Repeatable test scenarios and expected evidence
 manifests/fedora-cbt-vm.yaml  Generic ODF-backed Fedora VM
 manifests/backup-pvc.yaml     Backup output PVC
 manifests/backup-tracker.yaml CBT checkpoint tracker
@@ -41,5 +43,6 @@ Read the detailed procedures first:
 - `docs/ODF-SETUP.md`
 - `docs/CBT-ARCHITECTURE.md`
 - `docs/CBT-TEST-GUIDE.md`
+- `docs/SCENARIOS.md`
 
 The manifests use generic names and the `ocs-storagecluster-ceph-rbd` StorageClass. Change the StorageClass and namespace for the target cluster as needed.
