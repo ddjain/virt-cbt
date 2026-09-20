@@ -27,7 +27,7 @@ oc get sc
 
 ### Failure path
 
-Use `docs/ODF-SETUP.md` for OSD preparation, stale CSI credentials, StorageClient, and NooBaa troubleshooting.
+Use `../odf/ODF-SETUP.md` for OSD preparation, stale CSI credentials, StorageClient, and NooBaa troubleshooting.
 
 ## Scenario 2: Provision and Mount an ODF RBD PVC
 
@@ -121,7 +121,7 @@ Confirm that the VM is selected by the cluster CBT selector and that its data di
 
 ```bash
 oc get hyperconverged -A -o json \
-  | jq '.items[] | {featureGates:.spec.featureGates,cbt:.spec.configuration.changedBlockTrackingLabelSelectors}'
+  | jq '.items[] | {featureGates:.spec.featureGates,cbt:.spec.virtualization.changedBlockTrackingLabelSelectors}'
 ```
 
 The VM must have:
@@ -164,6 +164,10 @@ Create the first checkpoint for a VM backup chain.
 ```bash
 oc apply -f manifests/backup-tracker.yaml
 oc apply -f manifests/full-backup.yaml
+oc wait --for=jsonpath='{.status.type}'=Full \
+  virtualmachinebackup/fedora-cbt-vm-full -n cbt-demo --timeout=600s
+oc wait --for=jsonpath='{.status.conditions[?(@.type=="Done")].status}'=True \
+  virtualmachinebackup/fedora-cbt-vm-full -n cbt-demo --timeout=600s
 oc get virtualmachinebackup fedora-cbt-vm-full -n cbt-demo -o yaml
 ```
 
@@ -193,6 +197,10 @@ Wait for the VM workload to perform a write, then run:
 
 ```bash
 oc apply -f manifests/incremental-backup.yaml
+oc wait --for=jsonpath='{.status.type}'=Incremental \
+  virtualmachinebackup/fedora-cbt-vm-incremental -n cbt-demo --timeout=600s
+oc wait --for=jsonpath='{.status.conditions[?(@.type=="Done")].status}'=True \
+  virtualmachinebackup/fedora-cbt-vm-incremental -n cbt-demo --timeout=600s
 oc get virtualmachinebackup fedora-cbt-vm-incremental -n cbt-demo -o yaml
 oc get virtualmachinebackuptracker fedora-cbt-tracker -n cbt-demo -o yaml
 ```
@@ -221,7 +229,7 @@ Use a small guest workload that writes a timestamp repeatedly to an ODF-backed d
 date --iso-8601=seconds >> /data/log.txt
 ```
 
-A complete example can be added as a separate VM manifest. The guest must:
+No timestamp VM manifest is included in this repository. If one is added, the guest must:
 
 1. Format `/dev/vdc` only when it has no filesystem.
 2. Mount `/dev/vdc` at `/data`.

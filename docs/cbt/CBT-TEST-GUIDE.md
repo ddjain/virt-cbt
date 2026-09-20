@@ -15,12 +15,13 @@ export KUBECONFIG=/path/to/kubeconfig
 ```
 
 The VM name is intentionally generic. Change it only through these variables and matching manifest fields.
+The examples below target the tested OpenShift Virtualization release, which reports the terminal backup condition as `Done=True`. Other KubeVirt releases may report `Complete=True`; inspect `.status.conditions` if the `Done` wait does not match.
 
 ## Prerequisites
 
 ```bash
 oc get hyperconverged -A -o json \
-  | jq '.items[] | {name:.metadata.name,featureGates:.spec.featureGates,cbt:.spec.configuration.changedBlockTrackingLabelSelectors}'
+  | jq '.items[] | {name:.metadata.name,featureGates:.spec.featureGates,cbt:.spec.virtualization.changedBlockTrackingLabelSelectors}'
 oc get crd virtualmachinebackups.backup.kubevirt.io
 oc get crd virtualmachinebackuptrackers.backup.kubevirt.io
 oc get storagecluster,cephcluster -n openshift-storage -o wide
@@ -98,6 +99,8 @@ oc get virtualmachinebackuptracker "$TRACKER_NAME" -n "$NAMESPACE" -o yaml
 oc apply -f manifests/full-backup.yaml
 oc wait --for=jsonpath='{.status.type}'=Full \
   virtualmachinebackup/"$VM_NAME-full" -n "$NAMESPACE" --timeout=600s
+oc wait --for=jsonpath='{.status.conditions[?(@.type=="Done")].status}'=True \
+  virtualmachinebackup/"$VM_NAME-full" -n "$NAMESPACE" --timeout=600s
 oc get virtualmachinebackup "$VM_NAME-full" -n "$NAMESPACE" -o json \
   | jq '{type:.status.type,checkpoint:.status.checkpointName,conditions:.status.conditions,volumes:.status.includedVolumes}'
 ```
@@ -111,6 +114,8 @@ Wait long enough for the workload to make another write, then apply the second m
 ```bash
 oc apply -f manifests/incremental-backup.yaml
 oc wait --for=jsonpath='{.status.type}'=Incremental \
+  virtualmachinebackup/"$VM_NAME-incremental" -n "$NAMESPACE" --timeout=600s
+oc wait --for=jsonpath='{.status.conditions[?(@.type=="Done")].status}'=True \
   virtualmachinebackup/"$VM_NAME-incremental" -n "$NAMESPACE" --timeout=600s
 oc get virtualmachinebackup "$VM_NAME-incremental" -n "$NAMESPACE" -o json \
   | jq '{type:.status.type,checkpoint:.status.checkpointName,conditions:.status.conditions,volumes:.status.includedVolumes}'
@@ -132,14 +137,7 @@ oc get virtualmachinebackuptracker "$TRACKER_NAME" -n "$NAMESPACE" -o json \
 
 ## Optional timestamp workload
 
-The optional timestamp variant is in `manifests/fedora-cbt-timestamp-vm.yaml`. It installs a script like:
-
-```bash
-#!/bin/bash
-date --iso-8601=seconds >> /data/log.txt
-```
-
-and a systemd timer. Use it only if the guest image processes the supplied cloud-init data and mounts `/dev/vdc` at `/data`. Verify the log from inside the guest or with a maintenance pod after stopping the VM; do not assume the log exists solely because the cloud-init manifest was accepted.
+There is no timestamp VM manifest in this repository. If a timestamp workload is added, verify the file from inside the guest or with a maintenance pod after stopping the VM; do not assume the log exists solely because cloud-init was accepted.
 
 ## Verification summary
 

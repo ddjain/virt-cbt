@@ -3,6 +3,7 @@
 ## What is tested
 
 This repository tests KubeVirt-native incremental VM backup with ODF Ceph-RBD as the VM storage backend.
+Operational component inventory, node/storage/network checks, Prometheus metrics, and failure runbooks are in `CBT-OPERATIONS.md`.
 
 The storage backend and CBT implementation are separate layers:
 

@@ -11,10 +11,11 @@ Reusable lab manifests and documentation for:
 ## Repository layout
 
 ```text
-docs/ODF-SETUP.md             ODF deployment and troubleshooting
-docs/CBT-ARCHITECTURE.md      KubeVirt CBT design and state model
-docs/CBT-TEST-GUIDE.md        End-to-end commands and verification
-docs/SCENARIOS.md             Repeatable test scenarios and expected evidence
+docs/odf/ODF-SETUP.md              ODF deployment and troubleshooting
+docs/cbt/CBT-ARCHITECTURE.md       CBT design and state model
+docs/cbt/CBT-OPERATIONS.md         Components, dependencies, metrics, and runbooks
+docs/cbt/CBT-TEST-GUIDE.md         End-to-end commands and verification
+docs/chaos-test/SCENARIOS.md       Repeatable storage, VM, and CBT scenarios
 manifests/fedora-cbt-vm.yaml  Generic ODF-backed Fedora VM
 manifests/backup-pvc.yaml     Backup output PVC
 manifests/backup-tracker.yaml CBT checkpoint tracker
@@ -32,17 +33,25 @@ oc apply -f manifests/backup-pvc.yaml
 oc wait --for=condition=Ready vm/fedora-cbt-vm -n cbt-demo --timeout=300s
 oc apply -f manifests/backup-tracker.yaml
 oc apply -f manifests/full-backup.yaml
-# Wait for the full backup to reach Done=True before creating the next backup.
+oc wait --for=jsonpath='{.status.type}'=Full \
+  virtualmachinebackup/fedora-cbt-vm-full -n cbt-demo --timeout=600s
+oc wait --for=jsonpath='{.status.conditions[?(@.type=="Done")].status}'=True \
+  virtualmachinebackup/fedora-cbt-vm-full -n cbt-demo --timeout=600s
 oc get virtualmachinebackup fedora-cbt-vm-full -n cbt-demo -o yaml
 oc apply -f manifests/incremental-backup.yaml
+oc wait --for=jsonpath='{.status.type}'=Incremental \
+  virtualmachinebackup/fedora-cbt-vm-incremental -n cbt-demo --timeout=600s
+oc wait --for=jsonpath='{.status.conditions[?(@.type=="Done")].status}'=True \
+  virtualmachinebackup/fedora-cbt-vm-incremental -n cbt-demo --timeout=600s
 oc get virtualmachinebackup fedora-cbt-vm-incremental -n cbt-demo -o yaml
 ```
 
-Read the detailed procedures first:
+Read the detailed procedures and operations guide first:
 
-- `docs/ODF-SETUP.md`
-- `docs/CBT-ARCHITECTURE.md`
-- `docs/CBT-TEST-GUIDE.md`
-- `docs/SCENARIOS.md`
+- `docs/odf/ODF-SETUP.md`
+- `docs/cbt/CBT-ARCHITECTURE.md`
+- `docs/cbt/CBT-OPERATIONS.md`
+- `docs/cbt/CBT-TEST-GUIDE.md`
+- `docs/chaos-test/SCENARIOS.md`
 
 The manifests use generic names and the `ocs-storagecluster-ceph-rbd` StorageClass. Change the StorageClass and namespace for the target cluster as needed.
