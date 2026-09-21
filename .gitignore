@@ -1,2 +1,6 @@
 # Local cluster inventories, kubeconfigs, and test artifacts
 cloud29/
+config.env
+keys/
+reports/
+kube-burner/rendered/

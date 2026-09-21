@@ -1,0 +1,12 @@
+apiVersion: backup.kubevirt.io/v1alpha1
+kind: VirtualMachineBackupTracker
+metadata:
+  name: {{.prefix}}-{{.Replica}}-tracker
+  labels:
+    app.kubernetes.io/name: odf-cbt-validator
+    app.kubernetes.io/managed-by: kube-burner
+spec:
+  source:
+    apiGroup: kubevirt.io
+    kind: VirtualMachine
+    name: {{.prefix}}-{{.Replica}}

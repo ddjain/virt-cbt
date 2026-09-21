@@ -1,0 +1,42 @@
+global:
+  measurements: []
+jobs:
+  - name: odf-cbt-density
+    jobType: create
+    jobIterations: 1
+    qps: 5
+    burst: 5
+    namespacedIterations: false
+    namespace: REPLACE_NAMESPACE
+    verifyObjects: true
+    errorOnVerify: true
+    waitWhenFinished: true
+    maxWaitTimeout: 30m
+    cleanup: false
+    objects:
+      - objectTemplate: templates/fedora-cbt-secret.yml
+        replicas: REPLACE_REPLICAS
+        inputVars:
+          prefix: REPLACE_VM_PREFIX
+          user: REPLACE_SSH_USER
+          sshPublicKey: REPLACE_SSH_PUBLIC_KEY
+      - objectTemplate: templates/fedora-cbt-vm-object.yml
+        replicas: REPLACE_REPLICAS
+        inputVars:
+          prefix: REPLACE_VM_PREFIX
+          image: REPLACE_CONTAINER_IMAGE
+          cpu: REPLACE_VM_CPU
+          memory: REPLACE_VM_MEMORY
+          dataSize: REPLACE_DATA_SIZE
+          dataStorageClass: REPLACE_DATA_STORAGE_CLASS
+          targetNode: REPLACE_TARGET_NODE
+      - objectTemplate: templates/fedora-cbt-backup-pvc.yml
+        replicas: REPLACE_REPLICAS
+        inputVars:
+          prefix: REPLACE_VM_PREFIX
+          backupSize: REPLACE_BACKUP_SIZE
+          backupStorageClass: REPLACE_BACKUP_STORAGE_CLASS
+      - objectTemplate: templates/fedora-cbt-tracker.yml
+        replicas: REPLACE_REPLICAS
+        inputVars:
+          prefix: REPLACE_VM_PREFIX

@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{.prefix}}-{{.Replica}}-backup-output
+  labels:
+    app.kubernetes.io/name: odf-cbt-validator
+    app.kubernetes.io/managed-by: kube-burner
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{.backupSize}}
+  storageClassName: {{.backupStorageClass}}
