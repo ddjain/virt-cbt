@@ -1,0 +1,67 @@
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: {{.prefix}}-{{.Replica}}
+  labels:
+    app.kubernetes.io/name: odf-cbt-validator
+    app.kubernetes.io/managed-by: kube-burner
+    vm-os: fedora
+    changedBlockTracking: "true"
+spec:
+  runStrategy: Always
+  dataVolumeTemplates:
+  - metadata:
+      name: {{.prefix}}-{{.Replica}}-data
+    spec:
+      source:
+        blank: {}
+      pvc:
+        accessModes:
+        - ReadWriteOnce
+        volumeMode: Filesystem
+        resources:
+          requests:
+            storage: {{.dataSize}}
+        storageClassName: {{.dataStorageClass}}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: odf-cbt-validator
+        app.kubernetes.io/managed-by: kube-burner
+        vm-os: fedora
+    spec:
+      domain:
+        cpu:
+          cores: {{.cpu}}
+        resources:
+          requests:
+            memory: {{.memory}}
+        devices:
+          disks:
+          - name: containerdisk
+            disk:
+              bus: virtio
+          - name: cloudinitdisk
+            disk:
+              bus: virtio
+          - name: datadisk
+            changedBlockTracking: true
+            disk:
+              bus: virtio
+          interfaces:
+          - name: default
+            masquerade: {}
+      networks:
+      - name: default
+        pod: {}
+      volumes:
+      - name: containerdisk
+        containerDisk:
+          image: {{.image}}
+      - name: cloudinitdisk
+        cloudInitNoCloud:
+          secretRef:
+            name: {{.prefix}}-{{.Replica}}-userdata
+      - name: datadisk
+        dataVolume:
+          name: {{.prefix}}-{{.Replica}}-data

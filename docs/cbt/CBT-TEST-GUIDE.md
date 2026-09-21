@@ -1,194 +1,42 @@
-# Test CBT With an ODF-Backed Fedora VM
+# Fedora ODF CBT density test guide
 
-## Variables
+The primary workflow is the Make/kube-burner utility at repository root. It creates only Fedora VMs, each with an ODF data PVC, backup-output PVC, CBT tracker, and deterministic guest workload.
 
-Set these variables for a target cluster:
-
-```bash
-export NAMESPACE=cbt-demo
-export VM_NAME=fedora-cbt-vm
-export DATA_VOLUME_NAME=fedora-cbt-vm-data
-export DATA_SC=ocs-storagecluster-ceph-rbd
-export BACKUP_PVC=cbt-backup-output
-export TRACKER_NAME=fedora-cbt-tracker
-export KUBECONFIG=/path/to/kubeconfig
-```
-
-The VM name is intentionally generic. Change it only through these variables and matching manifest fields.
-The examples below target the tested OpenShift Virtualization release, which reports the terminal backup condition as `Done=True`. Other KubeVirt releases may report `Complete=True`; inspect `.status.conditions` if the `Done` wait does not match.
-
-## Prerequisites
+## Configuration
 
 ```bash
-oc get hyperconverged -A -o json \
-  | jq '.items[] | {name:.metadata.name,featureGates:.spec.featureGates,cbt:.spec.virtualization.changedBlockTrackingLabelSelectors}'
-oc get crd virtualmachinebackups.backup.kubevirt.io
-oc get crd virtualmachinebackuptrackers.backup.kubevirt.io
-oc get storagecluster,cephcluster -n openshift-storage -o wide
-oc get volumesnapshotclass
+make init-config
+$EDITOR config.env
+# Set KUBECONFIG, DATA_STORAGE_CLASS, BACKUP_STORAGE_CLASS, SSH_KEY and SSH_PUBLIC_KEY.
 ```
 
-Required:
+The default namespace is `cbt-demo`; for shared clusters use a unique namespace. `check-prereqs` requires `oc`, `virtctl`, `kube-burner`, and `jq`, then checks the VM/backup/tracker CRDs, ODF resources, storage classes, snapshot class, and CBT configuration.
 
-- `incrementalBackup` feature gate enabled.
-- CBT label selector matches `changedBlockTracking: "true"`.
-- ODF is healthy.
-- `DATA_SC` exists and provisions PVCs.
-- A default StorageClass exists for the CBT backend-state PVC.
-- An RBD VolumeSnapshotClass exists if the release requires snapshot capability checks.
-
-Set the ODF RBD class as default only after checking shared-cluster impact:
+## Density and backups
 
 ```bash
-oc patch storageclass "$DATA_SC" --type=merge \
-  -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+make check-prereqs
+make density-setup N=2
+make density-status
+make backup N=2
+sleep 5
+make cbt-backup N=2
+make verify N=2
+make status ALL=1
+make report
+make density-teardown
 ```
 
-## Create the VM and backup PVC
+`N=2` and `n=2` select the first two utility-owned VM names in lexical order. The same selector must be used for Full, Incremental, and verify operations so they use the same trackers. Use `VMS=fedora-cbt-0,fedora-cbt-1` for an exact selection, `SELECTOR=some-label=value` for a label subset, or `ALL=1` for every managed VM. Selection is mandatory for backup and verification. Duplicate, missing, unowned, zero, or over-sized selections fail.
 
-```bash
-oc create namespace "$NAMESPACE" --dry-run=client -o yaml | oc apply -f -
-oc apply -f manifests/fedora-cbt-vm.yaml
-oc apply -f manifests/backup-pvc.yaml
-```
+`e2e N=2` performs setup, Full, Incremental, and verification while leaving evidence in place. Each VM uses `${vm}-backup-output` and `${vm}-tracker`; backup work is bounded by `BACKUP_CONCURRENCY`. Reports are written below `REPORTS_DIR` with one summary, log, and per-VM result.
 
-Wait for storage and VM readiness:
+## Guest invariant
 
-```bash
-oc wait --for=jsonpath='{.status.phase}'=Bound \
-  pvc/"$DATA_VOLUME_NAME" -n "$NAMESPACE" --timeout=300s
-oc wait --for=jsonpath='{.status.phase}'=Bound \
-  pvc/"$BACKUP_PVC" -n "$NAMESPACE" --timeout=300s
-oc wait --for=condition=Ready vm/"$VM_NAME" -n "$NAMESPACE" --timeout=300s
-oc get vm,vmi,pvc -n "$NAMESPACE"
-```
+The service refuses to run unless `/data` is mounted. It writes `/data/vm-validator/workload.db` and `workload.log` every second. Verification checks the mount, SQLite integrity, contiguous sequence, digest correctness, and increasing sequence across two checks at least two seconds apart. This detects a stale guest or accidental writes to the container disk.
 
-The VM may require a DataVolume to complete before the VMI starts.
+## Restore limitation and release differences
 
-## Verify CBT state
+The Push-mode backup API is release-dependent. The utility accepts either `Done=True` or `Complete=True`, but insists on `Full` for the baseline and `Incremental` for the next backup and requires tracker advancement. These checks do not restore a backup. A restore-to-new-VM test and guest checkpoint comparison are required to prove recoverability.
 
-```bash
-oc get vm "$VM_NAME" -n "$NAMESPACE" -o json \
-  | jq '.status.changedBlockTracking, .status.volumeSnapshotStatuses'
-```
-
-Expected:
-
-```json
-{"state":"Enabled"}
-```
-
-If the state is `PendingRestart`, restart the VM and check again:
-
-```bash
-oc patch vm "$VM_NAME" -n "$NAMESPACE" --type=merge -p '{"spec":{"runStrategy":"Halted"}}'
-# wait for the VMI to disappear
-oc patch vm "$VM_NAME" -n "$NAMESPACE" --type=merge -p '{"spec":{"runStrategy":"Always"}}'
-```
-
-## Create the tracker
-
-```bash
-oc apply -f manifests/backup-tracker.yaml
-oc get virtualmachinebackuptracker "$TRACKER_NAME" -n "$NAMESPACE" -o yaml
-```
-
-## Take the first full backup
-
-```bash
-oc apply -f manifests/full-backup.yaml
-oc wait --for=jsonpath='{.status.type}'=Full \
-  virtualmachinebackup/"$VM_NAME-full" -n "$NAMESPACE" --timeout=600s
-oc wait --for=jsonpath='{.status.conditions[?(@.type=="Done")].status}'=True \
-  virtualmachinebackup/"$VM_NAME-full" -n "$NAMESPACE" --timeout=600s
-oc get virtualmachinebackup "$VM_NAME-full" -n "$NAMESPACE" -o json \
-  | jq '{type:.status.type,checkpoint:.status.checkpointName,conditions:.status.conditions,volumes:.status.includedVolumes}'
-```
-
-The first backup should report `Done=True` and `type: Full`.
-
-## Take the incremental backup
-
-Wait long enough for the workload to make another write, then apply the second manifest:
-
-```bash
-oc apply -f manifests/incremental-backup.yaml
-oc wait --for=jsonpath='{.status.type}'=Incremental \
-  virtualmachinebackup/"$VM_NAME-incremental" -n "$NAMESPACE" --timeout=600s
-oc wait --for=jsonpath='{.status.conditions[?(@.type=="Done")].status}'=True \
-  virtualmachinebackup/"$VM_NAME-incremental" -n "$NAMESPACE" --timeout=600s
-oc get virtualmachinebackup "$VM_NAME-incremental" -n "$NAMESPACE" -o json \
-  | jq '{type:.status.type,checkpoint:.status.checkpointName,conditions:.status.conditions,volumes:.status.includedVolumes}'
-```
-
-Expected:
-
-```text
-type: Incremental
-Done=True
-```
-
-Verify tracker advancement:
-
-```bash
-oc get virtualmachinebackuptracker "$TRACKER_NAME" -n "$NAMESPACE" -o json \
-  | jq '.status.latestCheckpoint'
-```
-
-## Optional timestamp workload
-
-There is no timestamp VM manifest in this repository. If a timestamp workload is added, verify the file from inside the guest or with a maintenance pod after stopping the VM; do not assume the log exists solely because cloud-init was accepted.
-
-## Verification summary
-
-```bash
-oc get vm "$VM_NAME" -n "$NAMESPACE" -o wide
-oc get pvc -n "$NAMESPACE"
-oc get virtualmachinebackup -n "$NAMESPACE" \
-  -o custom-columns=NAME:.metadata.name,TYPE:.status.type,DONE:.status.conditions[-1].status,CHECKPOINT:.status.checkpointName
-oc get virtualmachinebackuptracker "$TRACKER_NAME" -n "$NAMESPACE" -o yaml
-```
-
-The meaningful CBT result is:
-
-```text
-first backup: Done / Full
-second backup: Done / Incremental
-tracker: latest checkpoint updated
-VM: CBT Enabled
-```
-
-## Troubleshooting
-
-### No default StorageClass
-
-The VM may report `FailedBackendStorageCreate` or `no default storage class found`. Set an approved default StorageClass and restart the VM.
-
-### CBT remains Initializing
-
-Check the VM label, HCO selector, feature gate, VMI state, and virt-handler logs. A restart is normally required.
-
-### Backup says the VM has no CBT
-
-Confirm both VM and VMI status:
-
-```bash
-oc get vm,vmi "$VM_NAME" -n "$NAMESPACE" -o json \
-  | jq '.items[] | {kind:.kind,name:.metadata.name,cbt:.status.changedBlockTracking}'
-```
-
-### Backup target is stuck attaching
-
-The backup PVC is RWO. Ensure it is not mounted by another workload or backup and wait for the previous backup to complete.
-
-### Second backup is Full
-
-Confirm that the same tracker was used and that the first backup completed. A crash, online snapshot restore, disk reattach, or bitmap loss can cause per-disk fallback to full.
-
-## Cleanup
-
-```bash
-oc delete namespace "$NAMESPACE"
-```
-
-Only run cleanup after confirming that the VM, backups, tracker, PVCs, and backup contents are disposable.
+The older `manifests/` files remain fixtures for chaos-specific runbooks. They are not rendered by the density Make targets. Existing ODF installation and CBT architecture guidance remains in `docs/odf/` and `docs/cbt/CBT-OPERATIONS.md`.

@@ -1,57 +1,49 @@
-# ODF CBT
+# ODF CBT Fedora VM density validator
 
-Reusable lab manifests and documentation for:
+This repository provides a Fedora-only OpenShift Virtualization workload for validating ODF-backed KubeVirt CBT metadata. It follows the external-config, Make-driven pattern of [vmshift-validator](https://github.com/ddjain/vmshift-validator), using kube-burner to create deterministic VM density.
 
-1. Setting up OpenShift Data Foundation with local devices.
-2. Creating an OpenShift Virtualization Fedora VM on ODF Ceph-RBD.
-3. Enabling and verifying KubeVirt Changed Block Tracking.
-4. Taking full and incremental `VirtualMachineBackup` resources.
-5. Running repeatable storage, VM, backup, timestamp, and troubleshooting scenarios.
-
-## Repository layout
-
-```text
-docs/odf/ODF-SETUP.md              ODF deployment and troubleshooting
-docs/cbt/CBT-ARCHITECTURE.md       CBT design and state model
-docs/cbt/CBT-OPERATIONS.md         Components, dependencies, metrics, and runbooks
-docs/cbt/CBT-TEST-GUIDE.md         End-to-end commands and verification
-docs/chaos-test/scenarios_v2.md      CBT resilience chaos test plan (Scenario V2)
-manifests/fedora-cbt-vm.yaml  Generic ODF-backed Fedora VM
-manifests/backup-pvc.yaml     Backup output PVC
-manifests/backup-tracker.yaml CBT checkpoint tracker
-manifests/full-backup.yaml    First/full backup
-manifests/incremental-backup.yaml Follow-up/incremental backup
-```
+The guest writes one UTC row per second to `/data/vm-validator/workload.db` and `/data/vm-validator/workload.log`. Rows contain sequence, random payload, and SHA-256 digest. Verification checks the ODF mount, SQLite integrity, contiguous rows, digests, service liveness, VM/VMI/CBT state, PVCs, and Full/Incremental backup metadata. This is not a restore test.
 
 ## Quick start
 
 ```bash
-export KUBECONFIG=/path/to/kubeconfig
-oc create namespace cbt-demo --dry-run=client -o yaml | oc apply -f -
-oc apply -f manifests/fedora-cbt-vm.yaml
-oc apply -f manifests/backup-pvc.yaml
-oc wait --for=condition=Ready vm/fedora-cbt-vm -n cbt-demo --timeout=300s
-oc apply -f manifests/backup-tracker.yaml
-oc apply -f manifests/full-backup.yaml
-oc wait --for=jsonpath='{.status.type}'=Full \
-  virtualmachinebackup/fedora-cbt-vm-full -n cbt-demo --timeout=600s
-oc wait --for=jsonpath='{.status.conditions[?(@.type=="Done")].status}'=True \
-  virtualmachinebackup/fedora-cbt-vm-full -n cbt-demo --timeout=600s
-oc get virtualmachinebackup fedora-cbt-vm-full -n cbt-demo -o yaml
-oc apply -f manifests/incremental-backup.yaml
-oc wait --for=jsonpath='{.status.type}'=Incremental \
-  virtualmachinebackup/fedora-cbt-vm-incremental -n cbt-demo --timeout=600s
-oc wait --for=jsonpath='{.status.conditions[?(@.type=="Done")].status}'=True \
-  virtualmachinebackup/fedora-cbt-vm-incremental -n cbt-demo --timeout=600s
-oc get virtualmachinebackup fedora-cbt-vm-incremental -n cbt-demo -o yaml
+make init-config
+$EDITOR config.env
+make generate-keys                 # sets SSH_KEY only in the shell output; copy it into config.env
+make check-prereqs
+make density-setup N=2
+make backup N=2
+make cbt-backup N=2
+make verify N=2
+make report
+make density-teardown
 ```
 
-Read the detailed procedures and operations guide first:
+`config.example.env` contains all defaults. Set `KUBECONFIG`, storage classes, and `SSH_KEY`/`SSH_PUBLIC_KEY` for the target cluster. The namespace must be absent or labeled `app.kubernetes.io/managed-by=odf-cbt-validator`; teardown refuses an unowned namespace.
 
-- `docs/odf/ODF-SETUP.md`
-- `docs/cbt/CBT-ARCHITECTURE.md`
-- `docs/cbt/CBT-OPERATIONS.md`
-- `docs/cbt/CBT-TEST-GUIDE.md`
-- `docs/chaos-test/scenarios_v2.md`
+## Targets and selection
 
-The manifests use generic names and the `ocs-storagecluster-ceph-rbd` StorageClass. Change the StorageClass and namespace for the target cluster as needed.
+- `density-setup N=2` creates `VM_PREFIX-0` through `VM_PREFIX-1` with kube-burner. `n=2` is accepted; conflicting `N` and `n` is rejected.
+- `density-status` and `discover-vms` show the utility-owned pool.
+- `backup`, `cbt-backup`, `verify`, and `status` require exactly one selection: `VMS=a,b`, `N=2`, `SELECTOR=k=v`, or `ALL=1`. Count selection sorts names lexically and takes the first N. Explicit names retain caller order and reject duplicates, missing names, and VMs outside the base label.
+- `density-teardown` removes only the owned namespace.
+- `ssh VM=fedora-cbt-0 CMD='systemctl status vm-validator'` runs a guest command.
+- `report` prints the newest report; `list-reports` lists report directories newest first.
+- `e2e N=2` runs setup, Full backup, waits for new writes, Incremental backup, and verification without teardown.
+
+Each VM has its own `${vm}-data`, `${vm}-backup-output`, `${vm}-tracker`, `${vm}-full`, and `${vm}-incremental`. `BACKUP_CONCURRENCY` is reserved for bounded backup scheduling; results are isolated per VM under `REPORTS_DIR`.
+
+## Reports and caveats
+
+Mutating and validation commands create `summary.json`, `run.log`, and `per-vm/*.json`. Reports contain resource verdicts but never kubeconfig or SSH material. Backup APIs and CBT status fields are release-dependent; the utility accepts `Done=True` or `Complete=True` while requiring Full then Incremental types. A successful backup CR proves control-plane completion and checkpoint progression, not restoreability. Add a restore-to-new-VM comparison for that claim.
+
+## Layout
+
+```text
+kube-burner/odf-cbt-density.yml       density job
+kube-burner/templates/fedora-cbt-vm.yml Fedora VM, ODF disks and workload
+scripts/select-vms.sh                  shared deterministic selector
+scripts/odf-vm-validator.sh            lifecycle, backup, verification and reports
+manifests/                             fixtures for existing chaos runbooks
+docs/cbt/                              release-dependent CBT/ODF runbooks
+```

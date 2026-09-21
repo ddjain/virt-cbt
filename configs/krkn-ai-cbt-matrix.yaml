@@ -1,0 +1,1616 @@
+kubeconfig_file_path: /tmp/cloud29-cbt-kubeconfig
+seed: 42
+wait_duration: 30
+genetic:
+  generations: 2
+  population_size: 10
+  composition_rate: 0
+  population_injection_rate: 0
+baseline:
+  enable: true
+  duration: 120
+fitness_function:
+  items:
+  - query: sum(increase(kube_pod_container_status_restarts_total{namespace="cbt-demo"}[10m]))
+    type: point
+    weight: 2
+  - query: sum(kube_pod_status_phase{namespace="cbt-demo",phase=~"Pending|Failed|Unknown"})
+    type: point
+    weight: 2
+  - query: sum(kube_pod_container_status_waiting_reason{namespace="openshift-cnv",reason="CrashLoopBackOff"})
+    type: point
+    weight: 2
+  include_krkn_failure: true
+  include_health_check_failure: false
+  include_health_check_response_time: false
+scenario:
+  pod-scenarios:
+    enable: true
+  network-scenarios:
+    enable: true
+  kubevirt-scenarios:
+    enable: true
+  pvc-scenarios:
+    enable: true
+  storage-throttle:
+    enable: true
+  node-cpu-hog:
+    enable: true
+  node-memory-hog:
+    enable: true
+  node-io-hog:
+    enable: true
+  application-outages:
+    enable: false
+  container-scenarios:
+    enable: false
+  time-scenarios:
+    enable: false
+  dns-outage:
+    enable: false
+  syn-flood:
+    enable: false
+  service-disruption:
+    enable: false
+cluster_components:
+  namespaces:
+  - name: cbt-demo
+    pods:
+    - name: virt-launcher-fedora-cbt-vm-2klsj
+      labels:
+        app: fedora-cbt-vm
+        kubevirt.io: virt-launcher
+        kubevirt.io/created-by: 37bf7ba6-1fd5-4420-ae72-a39e68246dd9
+        kubevirt.io/nodeName: d39-h04-000-r660
+        kubevirt.io/vm: fedora-cbt-vm
+        vm.kubevirt.io/name: fedora-cbt-vm
+        vmi.kubevirt.io/id: fedora-cbt-vm
+      containers:
+      - name: compute
+      - name: volumecontainerdisk
+      owner:
+        kind: VirtualMachineInstance
+        name: fedora-cbt-vm
+    pvcs:
+    - name: cbt-backup-output
+    - name: fedora-cbt-vm-data
+      labels:
+        alerts.k8s.io/KubePersistentVolumeFillingUp: disabled
+        app: containerized-data-importer
+        app.kubernetes.io/component: storage
+        app.kubernetes.io/managed-by: cdi-controller
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        kubevirt.io/created-by: 0d107539-f0e9-447a-9b7d-d7e0bd19e5e5
+    - name: persistent-state-for-fedora-cbt-vm-cwcmr
+      labels:
+        cdi.kubevirt.io/applyStorageProfile: 'true'
+        persistent-state-for: fedora-cbt-vm
+    vmis:
+    - name: fedora-cbt-vm
+  - name: openshift-cnv
+    pods:
+    - name: aaq-operator-6ddbbfdcf-ch4wg
+      labels:
+        aaq.kubevirt.io: aaq-operator
+        app.kubernetes.io/component: quota-management
+        app.kubernetes.io/managed-by: olm
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        name: aaq-operator
+        operator.aaq.kubevirt.io: ''
+        pod-template-hash: 6ddbbfdcf
+        prometheus.aaq.kubevirt.io: 'true'
+      containers:
+      - name: aaq-operator
+      owner:
+        kind: ReplicaSet
+        name: aaq-operator-6ddbbfdcf
+    - name: bridge-marker-2blrm
+      labels:
+        app: bridge-marker
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: cnao-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 64d7b4c5c5
+        name: bridge-marker
+        pod-template-generation: '11'
+        prometheus.cnao.io: 'true'
+        tier: node
+      containers:
+      - name: bridge-marker
+      owner:
+        kind: DaemonSet
+        name: bridge-marker
+    - name: bridge-marker-42h4h
+      labels:
+        app: bridge-marker
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: cnao-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 64d7b4c5c5
+        name: bridge-marker
+        pod-template-generation: '11'
+        prometheus.cnao.io: 'true'
+        tier: node
+      containers:
+      - name: bridge-marker
+      owner:
+        kind: DaemonSet
+        name: bridge-marker
+    - name: bridge-marker-k6z6x
+      labels:
+        app: bridge-marker
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: cnao-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 64d7b4c5c5
+        name: bridge-marker
+        pod-template-generation: '11'
+        prometheus.cnao.io: 'true'
+        tier: node
+      containers:
+      - name: bridge-marker
+      owner:
+        kind: DaemonSet
+        name: bridge-marker
+    - name: bridge-marker-lrlbf
+      labels:
+        app: bridge-marker
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: cnao-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 64d7b4c5c5
+        name: bridge-marker
+        pod-template-generation: '11'
+        prometheus.cnao.io: 'true'
+        tier: node
+      containers:
+      - name: bridge-marker
+      owner:
+        kind: DaemonSet
+        name: bridge-marker
+    - name: bridge-marker-lvm97
+      labels:
+        app: bridge-marker
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: cnao-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 64d7b4c5c5
+        name: bridge-marker
+        pod-template-generation: '11'
+        prometheus.cnao.io: 'true'
+        tier: node
+      containers:
+      - name: bridge-marker
+      owner:
+        kind: DaemonSet
+        name: bridge-marker
+    - name: bridge-marker-lwkkq
+      labels:
+        app: bridge-marker
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: cnao-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 64d7b4c5c5
+        name: bridge-marker
+        pod-template-generation: '11'
+        prometheus.cnao.io: 'true'
+        tier: node
+      containers:
+      - name: bridge-marker
+      owner:
+        kind: DaemonSet
+        name: bridge-marker
+    - name: bridge-marker-mqdps
+      labels:
+        app: bridge-marker
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: cnao-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 64d7b4c5c5
+        name: bridge-marker
+        pod-template-generation: '11'
+        prometheus.cnao.io: 'true'
+        tier: node
+      containers:
+      - name: bridge-marker
+      owner:
+        kind: DaemonSet
+        name: bridge-marker
+    - name: bridge-marker-r2qmf
+      labels:
+        app: bridge-marker
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: cnao-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 64d7b4c5c5
+        name: bridge-marker
+        pod-template-generation: '11'
+        prometheus.cnao.io: 'true'
+        tier: node
+      containers:
+      - name: bridge-marker
+      owner:
+        kind: DaemonSet
+        name: bridge-marker
+    - name: bridge-marker-wlqtb
+      labels:
+        app: bridge-marker
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: cnao-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 64d7b4c5c5
+        name: bridge-marker
+        pod-template-generation: '11'
+        prometheus.cnao.io: 'true'
+        tier: node
+      containers:
+      - name: bridge-marker
+      owner:
+        kind: DaemonSet
+        name: bridge-marker
+    - name: bridge-marker-x26hc
+      labels:
+        app: bridge-marker
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: cnao-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 64d7b4c5c5
+        name: bridge-marker
+        pod-template-generation: '11'
+        prometheus.cnao.io: 'true'
+        tier: node
+      containers:
+      - name: bridge-marker
+      owner:
+        kind: DaemonSet
+        name: bridge-marker
+    - name: cdi-apiserver-59ddc84677-zjzdz
+      labels:
+        app: containerized-data-importer
+        app.kubernetes.io/component: storage
+        app.kubernetes.io/managed-by: cdi-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        cdi.kubevirt.io: cdi-apiserver
+        np.kubevirt.io/allow-access-cluster-services: 'true'
+        operator.cdi.kubevirt.io/createVersion: 4.21.8
+        pod-template-hash: 59ddc84677
+      containers:
+      - name: cdi-apiserver
+      owner:
+        kind: ReplicaSet
+        name: cdi-apiserver-59ddc84677
+    - name: cdi-deployment-74866fcb-4lkcb
+      labels:
+        app: containerized-data-importer
+        app.kubernetes.io/component: storage
+        app.kubernetes.io/managed-by: cdi-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        cdi.kubevirt.io: cdi-deployment
+        np.kubevirt.io/allow-access-cluster-services: 'true'
+        operator.cdi.kubevirt.io/createVersion: 4.21.8
+        pod-template-hash: 74866fcb
+        prometheus.cdi.kubevirt.io: 'true'
+      containers:
+      - name: cdi-deployment
+      owner:
+        kind: ReplicaSet
+        name: cdi-deployment-74866fcb
+    - name: cdi-operator-577466c7f5-jjkpq
+      labels:
+        app.kubernetes.io/component: storage
+        app.kubernetes.io/managed-by: olm
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        cdi.kubevirt.io: cdi-operator
+        name: cdi-operator
+        np.kubevirt.io/allow-access-cluster-services: 'true'
+        operator.cdi.kubevirt.io: ''
+        pod-template-hash: 577466c7f5
+        prometheus.cdi.kubevirt.io: 'true'
+      containers:
+      - name: cdi-operator
+      owner:
+        kind: ReplicaSet
+        name: cdi-operator-577466c7f5
+    - name: cdi-uploadproxy-cd7fc754f-kvlcw
+      labels:
+        app: containerized-data-importer
+        app.kubernetes.io/component: storage
+        app.kubernetes.io/managed-by: cdi-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        cdi.kubevirt.io: cdi-uploadproxy
+        np.kubevirt.io/allow-access-cluster-services: 'true'
+        operator.cdi.kubevirt.io/createVersion: 4.21.8
+        pod-template-hash: cd7fc754f
+      containers:
+      - name: cdi-uploadproxy
+      owner:
+        kind: ReplicaSet
+        name: cdi-uploadproxy-cd7fc754f
+    - name: cluster-network-addons-operator-554cdf854-7dvzx
+      labels:
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: olm
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        name: cluster-network-addons-operator
+        np.kubevirt.io/allow-access-cluster-services: ''
+        np.kubevirt.io/allow-prometheus-access: ''
+        pod-template-hash: 554cdf854
+        prometheus.cnao.io: 'true'
+      containers:
+      - name: cluster-network-addons-operator
+      owner:
+        kind: ReplicaSet
+        name: cluster-network-addons-operator-554cdf854
+    - name: hco-operator-867db799d7-kskfk
+      labels:
+        app.kubernetes.io/component: deployment
+        app.kubernetes.io/managed-by: olm
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        name: hyperconverged-cluster-operator
+        pod-template-hash: 867db799d7
+      containers:
+      - name: hyperconverged-cluster-operator
+      owner:
+        kind: ReplicaSet
+        name: hco-operator-867db799d7
+    - name: hco-webhook-5745ff6884-c579n
+      labels:
+        app.kubernetes.io/component: deployment
+        app.kubernetes.io/managed-by: olm
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        name: hyperconverged-cluster-webhook
+        pod-template-hash: 5745ff6884
+      containers:
+      - name: hyperconverged-cluster-webhook
+      owner:
+        kind: ReplicaSet
+        name: hco-webhook-5745ff6884
+    - name: hostpath-provisioner-csi-2mqnl
+      labels:
+        app.kubernetes.io/component: storage
+        app.kubernetes.io/managed-by: hostpath-provisioner-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 75559766b9
+        k8s-app: hostpath-provisioner
+        pod-template-generation: '6'
+        prometheus.hostpathprovisioner.kubevirt.io: 'true'
+      containers:
+      - name: hostpath-provisioner
+      - name: node-driver-registrar
+      - name: liveness-probe
+      - name: csi-provisioner
+      owner:
+        kind: DaemonSet
+        name: hostpath-provisioner-csi
+    - name: hostpath-provisioner-csi-6p9sb
+      labels:
+        app.kubernetes.io/component: storage
+        app.kubernetes.io/managed-by: hostpath-provisioner-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 75559766b9
+        k8s-app: hostpath-provisioner
+        pod-template-generation: '6'
+        prometheus.hostpathprovisioner.kubevirt.io: 'true'
+      containers:
+      - name: hostpath-provisioner
+      - name: node-driver-registrar
+      - name: liveness-probe
+      - name: csi-provisioner
+      owner:
+        kind: DaemonSet
+        name: hostpath-provisioner-csi
+    - name: hostpath-provisioner-csi-bvqff
+      labels:
+        app.kubernetes.io/component: storage
+        app.kubernetes.io/managed-by: hostpath-provisioner-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 75559766b9
+        k8s-app: hostpath-provisioner
+        pod-template-generation: '6'
+        prometheus.hostpathprovisioner.kubevirt.io: 'true'
+      containers:
+      - name: hostpath-provisioner
+      - name: node-driver-registrar
+      - name: liveness-probe
+      - name: csi-provisioner
+      owner:
+        kind: DaemonSet
+        name: hostpath-provisioner-csi
+    - name: hostpath-provisioner-csi-fj5qn
+      labels:
+        app.kubernetes.io/component: storage
+        app.kubernetes.io/managed-by: hostpath-provisioner-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 75559766b9
+        k8s-app: hostpath-provisioner
+        pod-template-generation: '6'
+        prometheus.hostpathprovisioner.kubevirt.io: 'true'
+      containers:
+      - name: hostpath-provisioner
+      - name: node-driver-registrar
+      - name: liveness-probe
+      - name: csi-provisioner
+      owner:
+        kind: DaemonSet
+        name: hostpath-provisioner-csi
+    - name: hostpath-provisioner-csi-fx2zs
+      labels:
+        app.kubernetes.io/component: storage
+        app.kubernetes.io/managed-by: hostpath-provisioner-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 75559766b9
+        k8s-app: hostpath-provisioner
+        pod-template-generation: '6'
+        prometheus.hostpathprovisioner.kubevirt.io: 'true'
+      containers:
+      - name: hostpath-provisioner
+      - name: node-driver-registrar
+      - name: liveness-probe
+      - name: csi-provisioner
+      owner:
+        kind: DaemonSet
+        name: hostpath-provisioner-csi
+    - name: hostpath-provisioner-csi-hqh25
+      labels:
+        app.kubernetes.io/component: storage
+        app.kubernetes.io/managed-by: hostpath-provisioner-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 75559766b9
+        k8s-app: hostpath-provisioner
+        pod-template-generation: '6'
+        prometheus.hostpathprovisioner.kubevirt.io: 'true'
+      containers:
+      - name: hostpath-provisioner
+      - name: node-driver-registrar
+      - name: liveness-probe
+      - name: csi-provisioner
+      owner:
+        kind: DaemonSet
+        name: hostpath-provisioner-csi
+    - name: hostpath-provisioner-csi-hrggb
+      labels:
+        app.kubernetes.io/component: storage
+        app.kubernetes.io/managed-by: hostpath-provisioner-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 75559766b9
+        k8s-app: hostpath-provisioner
+        pod-template-generation: '6'
+        prometheus.hostpathprovisioner.kubevirt.io: 'true'
+      containers:
+      - name: hostpath-provisioner
+      - name: node-driver-registrar
+      - name: liveness-probe
+      - name: csi-provisioner
+      owner:
+        kind: DaemonSet
+        name: hostpath-provisioner-csi
+    - name: hostpath-provisioner-csi-q2gjh
+      labels:
+        app.kubernetes.io/component: storage
+        app.kubernetes.io/managed-by: hostpath-provisioner-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 75559766b9
+        k8s-app: hostpath-provisioner
+        pod-template-generation: '6'
+        prometheus.hostpathprovisioner.kubevirt.io: 'true'
+      containers:
+      - name: hostpath-provisioner
+      - name: node-driver-registrar
+      - name: liveness-probe
+      - name: csi-provisioner
+      owner:
+        kind: DaemonSet
+        name: hostpath-provisioner-csi
+    - name: hostpath-provisioner-csi-rssmb
+      labels:
+        app.kubernetes.io/component: storage
+        app.kubernetes.io/managed-by: hostpath-provisioner-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 75559766b9
+        k8s-app: hostpath-provisioner
+        pod-template-generation: '6'
+        prometheus.hostpathprovisioner.kubevirt.io: 'true'
+      containers:
+      - name: hostpath-provisioner
+      - name: node-driver-registrar
+      - name: liveness-probe
+      - name: csi-provisioner
+      owner:
+        kind: DaemonSet
+        name: hostpath-provisioner-csi
+    - name: hostpath-provisioner-csi-zfrs2
+      labels:
+        app.kubernetes.io/component: storage
+        app.kubernetes.io/managed-by: hostpath-provisioner-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 75559766b9
+        k8s-app: hostpath-provisioner
+        pod-template-generation: '6'
+        prometheus.hostpathprovisioner.kubevirt.io: 'true'
+      containers:
+      - name: hostpath-provisioner
+      - name: node-driver-registrar
+      - name: liveness-probe
+      - name: csi-provisioner
+      owner:
+        kind: DaemonSet
+        name: hostpath-provisioner-csi
+    - name: hostpath-provisioner-operator-5b8ccfbdcf-zcc28
+      labels:
+        app.kubernetes.io/component: storage
+        app.kubernetes.io/managed-by: olm
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        name: hostpath-provisioner-operator
+        operator.hostpath-provisioner.kubevirt.io: ''
+        pod-template-hash: 5b8ccfbdcf
+        prometheus.hostpathprovisioner.kubevirt.io: 'true'
+      containers:
+      - name: hostpath-provisioner-operator
+      owner:
+        kind: ReplicaSet
+        name: hostpath-provisioner-operator-5b8ccfbdcf
+    - name: hyperconverged-cluster-cli-download-cdd5489b6-hcnpg
+      labels:
+        app.kubernetes.io/component: deployment
+        app.kubernetes.io/managed-by: olm
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        name: hyperconverged-cluster-cli-download
+        pod-template-hash: cdd5489b6
+      containers:
+      - name: server
+      owner:
+        kind: ReplicaSet
+        name: hyperconverged-cluster-cli-download-cdd5489b6
+    - name: kube-cni-linux-bridge-plugin-4zbnw
+      labels:
+        app: cni-plugins
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: cnao-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: b7964c85f
+        name: kube-cni-linux-bridge-plugin
+        pod-template-generation: '11'
+        prometheus.cnao.io: 'true'
+        tier: node
+      containers:
+      - name: cni-plugins
+      owner:
+        kind: DaemonSet
+        name: kube-cni-linux-bridge-plugin
+    - name: kube-cni-linux-bridge-plugin-5krh9
+      labels:
+        app: cni-plugins
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: cnao-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: b7964c85f
+        name: kube-cni-linux-bridge-plugin
+        pod-template-generation: '11'
+        prometheus.cnao.io: 'true'
+        tier: node
+      containers:
+      - name: cni-plugins
+      owner:
+        kind: DaemonSet
+        name: kube-cni-linux-bridge-plugin
+    - name: kube-cni-linux-bridge-plugin-65sh4
+      labels:
+        app: cni-plugins
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: cnao-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: b7964c85f
+        name: kube-cni-linux-bridge-plugin
+        pod-template-generation: '11'
+        prometheus.cnao.io: 'true'
+        tier: node
+      containers:
+      - name: cni-plugins
+      owner:
+        kind: DaemonSet
+        name: kube-cni-linux-bridge-plugin
+    - name: kube-cni-linux-bridge-plugin-6x928
+      labels:
+        app: cni-plugins
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: cnao-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: b7964c85f
+        name: kube-cni-linux-bridge-plugin
+        pod-template-generation: '11'
+        prometheus.cnao.io: 'true'
+        tier: node
+      containers:
+      - name: cni-plugins
+      owner:
+        kind: DaemonSet
+        name: kube-cni-linux-bridge-plugin
+    - name: kube-cni-linux-bridge-plugin-75h5h
+      labels:
+        app: cni-plugins
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: cnao-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: b7964c85f
+        name: kube-cni-linux-bridge-plugin
+        pod-template-generation: '11'
+        prometheus.cnao.io: 'true'
+        tier: node
+      containers:
+      - name: cni-plugins
+      owner:
+        kind: DaemonSet
+        name: kube-cni-linux-bridge-plugin
+    - name: kube-cni-linux-bridge-plugin-hzc9p
+      labels:
+        app: cni-plugins
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: cnao-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: b7964c85f
+        name: kube-cni-linux-bridge-plugin
+        pod-template-generation: '11'
+        prometheus.cnao.io: 'true'
+        tier: node
+      containers:
+      - name: cni-plugins
+      owner:
+        kind: DaemonSet
+        name: kube-cni-linux-bridge-plugin
+    - name: kube-cni-linux-bridge-plugin-ktxpp
+      labels:
+        app: cni-plugins
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: cnao-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: b7964c85f
+        name: kube-cni-linux-bridge-plugin
+        pod-template-generation: '11'
+        prometheus.cnao.io: 'true'
+        tier: node
+      containers:
+      - name: cni-plugins
+      owner:
+        kind: DaemonSet
+        name: kube-cni-linux-bridge-plugin
+    - name: kube-cni-linux-bridge-plugin-nd4wc
+      labels:
+        app: cni-plugins
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: cnao-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: b7964c85f
+        name: kube-cni-linux-bridge-plugin
+        pod-template-generation: '11'
+        prometheus.cnao.io: 'true'
+        tier: node
+      containers:
+      - name: cni-plugins
+      owner:
+        kind: DaemonSet
+        name: kube-cni-linux-bridge-plugin
+    - name: kube-cni-linux-bridge-plugin-vd772
+      labels:
+        app: cni-plugins
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: cnao-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: b7964c85f
+        name: kube-cni-linux-bridge-plugin
+        pod-template-generation: '11'
+        prometheus.cnao.io: 'true'
+        tier: node
+      containers:
+      - name: cni-plugins
+      owner:
+        kind: DaemonSet
+        name: kube-cni-linux-bridge-plugin
+    - name: kube-cni-linux-bridge-plugin-vr2kv
+      labels:
+        app: cni-plugins
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: cnao-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: b7964c85f
+        name: kube-cni-linux-bridge-plugin
+        pod-template-generation: '11'
+        prometheus.cnao.io: 'true'
+        tier: node
+      containers:
+      - name: cni-plugins
+      owner:
+        kind: DaemonSet
+        name: kube-cni-linux-bridge-plugin
+    - name: kubemacpool-cert-manager-6d588794f7-k59fx
+      labels:
+        allow-access-cluster-services: ''
+        app: kubemacpool
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: cnao-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        control-plane: cert-manager
+        controller-tools.k8s.io: '1.0'
+        pod-template-hash: 6d588794f7
+        prometheus.cnao.io: 'true'
+      containers:
+      - name: manager
+      owner:
+        kind: ReplicaSet
+        name: kubemacpool-cert-manager-6d588794f7
+    - name: kubemacpool-mac-controller-manager-799884cb8f-znqhf
+      labels:
+        allow-access-cluster-services: ''
+        app: kubemacpool
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: cnao-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        control-plane: mac-controller-manager
+        controller-tools.k8s.io: '1.0'
+        pod-template-hash: 799884cb8f
+        prometheus.cnao.io: 'false'
+      containers:
+      - name: manager
+      owner:
+        kind: ReplicaSet
+        name: kubemacpool-mac-controller-manager-799884cb8f
+    - name: kubevirt-apiserver-proxy-7d7cc66ff5-56z9w
+      labels:
+        app: kubevirt-hyperconverged
+        app.kubernetes.io/component: kubevirt-apiserver-proxy
+        app.kubernetes.io/managed-by: hco-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        pod-template-hash: 7d7cc66ff5
+      containers:
+      - name: kubevirt-apiserver-proxy
+      owner:
+        kind: ReplicaSet
+        name: kubevirt-apiserver-proxy-7d7cc66ff5
+    - name: kubevirt-apiserver-proxy-7d7cc66ff5-l6j4d
+      labels:
+        app: kubevirt-hyperconverged
+        app.kubernetes.io/component: kubevirt-apiserver-proxy
+        app.kubernetes.io/managed-by: hco-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        pod-template-hash: 7d7cc66ff5
+      containers:
+      - name: kubevirt-apiserver-proxy
+      owner:
+        kind: ReplicaSet
+        name: kubevirt-apiserver-proxy-7d7cc66ff5
+    - name: kubevirt-console-plugin-6f89f54dbd-2ddsz
+      labels:
+        app: kubevirt-hyperconverged
+        app.kubernetes.io/component: kubevirt-console-plugin
+        app.kubernetes.io/managed-by: hco-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        pod-template-hash: 6f89f54dbd
+      containers:
+      - name: kubevirt-console-plugin
+      owner:
+        kind: ReplicaSet
+        name: kubevirt-console-plugin-6f89f54dbd
+    - name: kubevirt-console-plugin-6f89f54dbd-tf7zf
+      labels:
+        app: kubevirt-hyperconverged
+        app.kubernetes.io/component: kubevirt-console-plugin
+        app.kubernetes.io/managed-by: hco-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        pod-template-hash: 6f89f54dbd
+      containers:
+      - name: kubevirt-console-plugin
+      owner:
+        kind: ReplicaSet
+        name: kubevirt-console-plugin-6f89f54dbd
+    - name: kubevirt-ipam-controller-manager-59f84cf979-fc8xg
+      labels:
+        allow-access-cluster-services: ''
+        app: ipam-virt-workloads
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: cnao-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        control-plane: manager
+        pod-template-hash: 59f84cf979
+        prometheus.cnao.io: 'true'
+      containers:
+      - name: manager
+      owner:
+        kind: ReplicaSet
+        name: kubevirt-ipam-controller-manager-59f84cf979
+    - name: kubevirt-ipam-controller-manager-59f84cf979-fchzv
+      labels:
+        allow-access-cluster-services: ''
+        app: ipam-virt-workloads
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: cnao-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        control-plane: manager
+        pod-template-hash: 59f84cf979
+        prometheus.cnao.io: 'true'
+      containers:
+      - name: manager
+      owner:
+        kind: ReplicaSet
+        name: kubevirt-ipam-controller-manager-59f84cf979
+    - name: kubevirt-migration-controller-5fb7f8ddf5-2gskh
+      labels:
+        app: kubevirt-migration-controller
+        app.kubernetes.io/component: migration
+        app.kubernetes.io/managed-by: kubevirt-migration-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        migrations.kubevirt.io: kubevirt-migration-controller
+        operator.migrations.kubevirt.io/createVersion: 4.21.8
+        pod-template-hash: 5fb7f8ddf5
+        prometheus.migrations.kubevirt.io: 'true'
+      containers:
+      - name: kubevirt-migration-controller
+      owner:
+        kind: ReplicaSet
+        name: kubevirt-migration-controller-5fb7f8ddf5
+    - name: kubevirt-migration-operator-67bccbf685-l2xsg
+      labels:
+        app.kubernetes.io/component: migration
+        app.kubernetes.io/managed-by: olm
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        name: kubevirt-migration-operator
+        operator.migrations.kubevirt.io: ''
+        pod-template-hash: 67bccbf685
+      containers:
+      - name: operator
+      owner:
+        kind: ReplicaSet
+        name: kubevirt-migration-operator-67bccbf685
+    - name: ssp-operator-6cb9fdddc9-xqs4b
+      labels:
+        app.kubernetes.io/component: schedule
+        app.kubernetes.io/managed-by: olm
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        control-plane: ssp-operator
+        name: ssp-operator
+        np.kubevirt.io/allow-access-cluster-services: 'true'
+        pod-template-hash: 6cb9fdddc9
+        prometheus.ssp.kubevirt.io: 'true'
+      containers:
+      - name: manager
+      owner:
+        kind: ReplicaSet
+        name: ssp-operator-6cb9fdddc9
+    - name: virt-api-5fcddbfc45-mtpxf
+      labels:
+        app.kubernetes.io/component: compute
+        app.kubernetes.io/managed-by: virt-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        kubevirt.io: virt-api
+        np.kubevirt.io/allow-access-cluster-services: 'true'
+        pod-template-hash: 5fcddbfc45
+        prometheus.kubevirt.io: 'true'
+      containers:
+      - name: virt-api
+      owner:
+        kind: ReplicaSet
+        name: virt-api-5fcddbfc45
+    - name: virt-api-5fcddbfc45-s6pvb
+      labels:
+        app.kubernetes.io/component: compute
+        app.kubernetes.io/managed-by: virt-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        kubevirt.io: virt-api
+        np.kubevirt.io/allow-access-cluster-services: 'true'
+        pod-template-hash: 5fcddbfc45
+        prometheus.kubevirt.io: 'true'
+      containers:
+      - name: virt-api
+      owner:
+        kind: ReplicaSet
+        name: virt-api-5fcddbfc45
+    - name: virt-controller-65f5647dff-5d2hk
+      labels:
+        app.kubernetes.io/component: compute
+        app.kubernetes.io/managed-by: virt-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        kubevirt.io: virt-controller
+        np.kubevirt.io/allow-access-cluster-services: 'true'
+        pod-template-hash: 65f5647dff
+        prometheus.kubevirt.io: 'true'
+      containers:
+      - name: virt-controller
+      owner:
+        kind: ReplicaSet
+        name: virt-controller-65f5647dff
+    - name: virt-controller-65f5647dff-lmmsz
+      labels:
+        app.kubernetes.io/component: compute
+        app.kubernetes.io/managed-by: virt-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        kubevirt.io: virt-controller
+        np.kubevirt.io/allow-access-cluster-services: 'true'
+        pod-template-hash: 65f5647dff
+        prometheus.kubevirt.io: 'true'
+      containers:
+      - name: virt-controller
+      owner:
+        kind: ReplicaSet
+        name: virt-controller-65f5647dff
+    - name: virt-exportproxy-54bdbbbcb9-5p9qn
+      labels:
+        app.kubernetes.io/component: compute
+        app.kubernetes.io/managed-by: virt-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        kubevirt.io: virt-exportproxy
+        np.kubevirt.io/allow-access-cluster-services: 'true'
+        pod-template-hash: 54bdbbbcb9
+        prometheus.kubevirt.io: 'true'
+      containers:
+      - name: exportproxy
+      owner:
+        kind: ReplicaSet
+        name: virt-exportproxy-54bdbbbcb9
+    - name: virt-exportproxy-54bdbbbcb9-mh6kq
+      labels:
+        app.kubernetes.io/component: compute
+        app.kubernetes.io/managed-by: virt-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        kubevirt.io: virt-exportproxy
+        np.kubevirt.io/allow-access-cluster-services: 'true'
+        pod-template-hash: 54bdbbbcb9
+        prometheus.kubevirt.io: 'true'
+      containers:
+      - name: exportproxy
+      owner:
+        kind: ReplicaSet
+        name: virt-exportproxy-54bdbbbcb9
+    - name: virt-handler-927r8
+      labels:
+        app.kubernetes.io/component: compute
+        app.kubernetes.io/managed-by: virt-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 7bd8c8fdbc
+        kubevirt.io: virt-handler
+        np.kubevirt.io/allow-access-cluster-services: 'true'
+        pod-template-generation: '9'
+        prometheus.kubevirt.io: 'true'
+      containers:
+      - name: virt-handler
+      owner:
+        kind: DaemonSet
+        name: virt-handler
+    - name: virt-handler-cbr6g
+      labels:
+        app.kubernetes.io/component: compute
+        app.kubernetes.io/managed-by: virt-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 7bd8c8fdbc
+        kubevirt.io: virt-handler
+        np.kubevirt.io/allow-access-cluster-services: 'true'
+        pod-template-generation: '9'
+        prometheus.kubevirt.io: 'true'
+      containers:
+      - name: virt-handler
+      owner:
+        kind: DaemonSet
+        name: virt-handler
+    - name: virt-handler-csj77
+      labels:
+        app.kubernetes.io/component: compute
+        app.kubernetes.io/managed-by: virt-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 7bd8c8fdbc
+        kubevirt.io: virt-handler
+        np.kubevirt.io/allow-access-cluster-services: 'true'
+        pod-template-generation: '9'
+        prometheus.kubevirt.io: 'true'
+      containers:
+      - name: virt-handler
+      owner:
+        kind: DaemonSet
+        name: virt-handler
+    - name: virt-handler-jdqpg
+      labels:
+        app.kubernetes.io/component: compute
+        app.kubernetes.io/managed-by: virt-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 7bd8c8fdbc
+        kubevirt.io: virt-handler
+        np.kubevirt.io/allow-access-cluster-services: 'true'
+        pod-template-generation: '9'
+        prometheus.kubevirt.io: 'true'
+      containers:
+      - name: virt-handler
+      owner:
+        kind: DaemonSet
+        name: virt-handler
+    - name: virt-handler-lsf8l
+      labels:
+        app.kubernetes.io/component: compute
+        app.kubernetes.io/managed-by: virt-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 7bd8c8fdbc
+        kubevirt.io: virt-handler
+        np.kubevirt.io/allow-access-cluster-services: 'true'
+        pod-template-generation: '9'
+        prometheus.kubevirt.io: 'true'
+      containers:
+      - name: virt-handler
+      owner:
+        kind: DaemonSet
+        name: virt-handler
+    - name: virt-handler-qrffd
+      labels:
+        app.kubernetes.io/component: compute
+        app.kubernetes.io/managed-by: virt-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 7bd8c8fdbc
+        kubevirt.io: virt-handler
+        np.kubevirt.io/allow-access-cluster-services: 'true'
+        pod-template-generation: '9'
+        prometheus.kubevirt.io: 'true'
+      containers:
+      - name: virt-handler
+      owner:
+        kind: DaemonSet
+        name: virt-handler
+    - name: virt-handler-rgmpj
+      labels:
+        app.kubernetes.io/component: compute
+        app.kubernetes.io/managed-by: virt-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 7bd8c8fdbc
+        kubevirt.io: virt-handler
+        np.kubevirt.io/allow-access-cluster-services: 'true'
+        pod-template-generation: '9'
+        prometheus.kubevirt.io: 'true'
+      containers:
+      - name: virt-handler
+      owner:
+        kind: DaemonSet
+        name: virt-handler
+    - name: virt-handler-shd7m
+      labels:
+        app.kubernetes.io/component: compute
+        app.kubernetes.io/managed-by: virt-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 7bd8c8fdbc
+        kubevirt.io: virt-handler
+        np.kubevirt.io/allow-access-cluster-services: 'true'
+        pod-template-generation: '9'
+        prometheus.kubevirt.io: 'true'
+      containers:
+      - name: virt-handler
+      owner:
+        kind: DaemonSet
+        name: virt-handler
+    - name: virt-handler-x5bqb
+      labels:
+        app.kubernetes.io/component: compute
+        app.kubernetes.io/managed-by: virt-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 7bd8c8fdbc
+        kubevirt.io: virt-handler
+        np.kubevirt.io/allow-access-cluster-services: 'true'
+        pod-template-generation: '9'
+        prometheus.kubevirt.io: 'true'
+      containers:
+      - name: virt-handler
+      owner:
+        kind: DaemonSet
+        name: virt-handler
+    - name: virt-handler-zqpkk
+      labels:
+        app.kubernetes.io/component: compute
+        app.kubernetes.io/managed-by: virt-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        controller-revision-hash: 7bd8c8fdbc
+        kubevirt.io: virt-handler
+        np.kubevirt.io/allow-access-cluster-services: 'true'
+        pod-template-generation: '9'
+        prometheus.kubevirt.io: 'true'
+      containers:
+      - name: virt-handler
+      owner:
+        kind: DaemonSet
+        name: virt-handler
+    - name: virt-operator-845f545845-7vp45
+      labels:
+        app.kubernetes.io/component: compute
+        app.kubernetes.io/managed-by: olm
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        kubevirt.io: virt-operator
+        name: virt-operator
+        np.kubevirt.io/allow-access-cluster-services: 'true'
+        pod-template-hash: 845f545845
+        prometheus.kubevirt.io: 'true'
+      containers:
+      - name: virt-operator
+      owner:
+        kind: ReplicaSet
+        name: virt-operator-845f545845
+    - name: virt-operator-845f545845-dxnv4
+      labels:
+        app.kubernetes.io/component: compute
+        app.kubernetes.io/managed-by: olm
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        kubevirt.io: virt-operator
+        name: virt-operator
+        np.kubevirt.io/allow-access-cluster-services: 'true'
+        pod-template-hash: 845f545845
+        prometheus.kubevirt.io: 'true'
+      containers:
+      - name: virt-operator
+      owner:
+        kind: ReplicaSet
+        name: virt-operator-845f545845
+    - name: virt-platform-autopilot-5978ddf6d5-hfkpl
+      labels:
+        app: virt-platform-autopilot
+        app.kubernetes.io/component: autopilot
+        app.kubernetes.io/managed-by: olm
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        control-plane: controller-manager
+        pod-template-hash: 5978ddf6d5
+      containers:
+      - name: manager
+      owner:
+        kind: ReplicaSet
+        name: virt-platform-autopilot-5978ddf6d5
+    - name: virt-synchronization-controller-6d4bb5868b-bbgq9
+      labels:
+        app.kubernetes.io/component: compute
+        app.kubernetes.io/managed-by: virt-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        kubevirt.io: virt-synchronization-controller
+        np.kubevirt.io/allow-access-cluster-services: 'true'
+        pod-template-hash: 6d4bb5868b
+      containers:
+      - name: sync
+      owner:
+        kind: ReplicaSet
+        name: virt-synchronization-controller-6d4bb5868b
+    - name: virt-synchronization-controller-6d4bb5868b-xd4kr
+      labels:
+        app.kubernetes.io/component: compute
+        app.kubernetes.io/managed-by: virt-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        kubevirt.io: virt-synchronization-controller
+        np.kubevirt.io/allow-access-cluster-services: 'true'
+        pod-template-hash: 6d4bb5868b
+      containers:
+      - name: sync
+      owner:
+        kind: ReplicaSet
+        name: virt-synchronization-controller-6d4bb5868b
+    - name: virt-template-validator-8fbd8fd4c-998km
+      labels:
+        app.kubernetes.io/component: templating
+        app.kubernetes.io/managed-by: ssp-operator
+        app.kubernetes.io/name: template-validator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        kubevirt.io: virt-template-validator
+        name: virt-template-validator
+        pod-template-hash: 8fbd8fd4c
+        prometheus.ssp.kubevirt.io: 'true'
+      containers:
+      - name: webhook
+      owner:
+        kind: ReplicaSet
+        name: virt-template-validator-8fbd8fd4c
+    - name: virt-template-validator-8fbd8fd4c-zbdgx
+      labels:
+        app.kubernetes.io/component: templating
+        app.kubernetes.io/managed-by: ssp-operator
+        app.kubernetes.io/name: template-validator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        kubevirt.io: virt-template-validator
+        name: virt-template-validator
+        pod-template-hash: 8fbd8fd4c
+        prometheus.ssp.kubevirt.io: 'true'
+      containers:
+      - name: webhook
+      owner:
+        kind: ReplicaSet
+        name: virt-template-validator-8fbd8fd4c
+    services:
+    - name: cdi-api
+      labels:
+        app: containerized-data-importer
+        app.kubernetes.io/component: storage
+        app.kubernetes.io/managed-by: cdi-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        cdi.kubevirt.io: cdi-apiserver
+        operator.cdi.kubevirt.io/createVersion: 4.21.8
+        operator.cdi.kubevirt.io/updateVersion: 4.22.9
+      ports:
+      - port: 443
+        target_port: 8443
+    - name: cdi-prometheus-metrics
+      labels:
+        app: containerized-data-importer
+        app.kubernetes.io/component: storage
+        app.kubernetes.io/managed-by: cdi-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        cdi.kubevirt.io: ''
+        operator.cdi.kubevirt.io/createVersion: 4.21.8
+        operator.cdi.kubevirt.io/updateVersion: 4.22.9
+        prometheus.cdi.kubevirt.io: 'true'
+      ports:
+      - port: 8443
+        target_port: metrics
+    - name: cdi-uploadproxy
+      labels:
+        app: containerized-data-importer
+        app.kubernetes.io/component: storage
+        app.kubernetes.io/managed-by: cdi-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        cdi.kubevirt.io: cdi-uploadproxy
+        operator.cdi.kubevirt.io/createVersion: 4.21.8
+        operator.cdi.kubevirt.io/updateVersion: 4.22.9
+      ports:
+      - port: 443
+        target_port: 8443
+    - name: cluster-network-addons-operator-prometheus-metrics
+      labels:
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: cnao-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        networkaddonsoperator.network.kubevirt.io/version: sha256_46a381424df47a319ff358f9b7dcd36329f1949bc29f3f0699baa63d
+        prometheus.cnao.io: 'true'
+      ports:
+      - port: 8443
+        target_port: metrics
+    - name: hco-webhook-service
+      labels:
+        olm.managed: 'true'
+        operators.coreos.com/kubevirt-hyperconverged.openshift-cnv: ''
+      ports:
+      - port: 4343
+        target_port: 4343
+    - name: hostpath-provisioner-operator-service
+      labels:
+        olm.managed: 'true'
+        operators.coreos.com/kubevirt-hyperconverged.openshift-cnv: ''
+      ports:
+      - port: 9443
+        target_port: 9443
+    - name: hpp-prometheus-metrics
+      labels:
+        app.kubernetes.io/component: storage
+        app.kubernetes.io/managed-by: hostpath-provisioner-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        k8s-app: hostpath-provisioner
+        prometheus.hostpathprovisioner.kubevirt.io: 'true'
+      ports:
+      - port: 8443
+        target_port: metrics
+    - name: hyperconverged-cluster-cli-download
+      labels:
+        app: kubevirt-hyperconverged
+        app.kubernetes.io/component: compute
+        app.kubernetes.io/managed-by: hco-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+      ports:
+      - port: 8080
+        target_port: 8080
+    - name: hyperconverged-cluster-webhook-operator-metrics
+      labels:
+        app: hyperconverged-cluster-webhook
+        app.kubernetes.io/component: monitoring
+        app.kubernetes.io/managed-by: hco-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+      ports:
+      - port: 8443
+        target_port: 8443
+    - name: kubemacpool-metrics-service
+      labels:
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: cnao-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        control-plane: mac-controller-manager
+        networkaddonsoperator.network.kubevirt.io/version: sha256_46a381424df47a319ff358f9b7dcd36329f1949bc29f3f0699baa63d
+        prometheus.cnao.io: 'false'
+        prometheus.kubemacpool.io: 'true'
+      ports:
+      - port: 8443
+        target_port: 8443
+    - name: kubemacpool-service
+      labels:
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: cnao-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        networkaddonsoperator.network.kubevirt.io/version: sha256_46a381424df47a319ff358f9b7dcd36329f1949bc29f3f0699baa63d
+        prometheus.cnao.io: 'true'
+      ports:
+      - port: 443
+        target_port: 8000
+    - name: kubevirt-apiserver-proxy-service
+      labels:
+        app: kubevirt-hyperconverged
+        app.kubernetes.io/component: kubevirt-apiserver-proxy
+        app.kubernetes.io/managed-by: hco-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+      ports:
+      - port: 8080
+        target_port: 8080
+    - name: kubevirt-console-plugin-service
+      labels:
+        app: kubevirt-hyperconverged
+        app.kubernetes.io/component: kubevirt-console-plugin
+        app.kubernetes.io/managed-by: hco-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+      ports:
+      - port: 9443
+        target_port: 9443
+    - name: kubevirt-hyperconverged-operator-metrics
+      labels:
+        app: kubevirt-hyperconverged
+        app.kubernetes.io/component: monitoring
+        app.kubernetes.io/managed-by: hco-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+      ports:
+      - port: 8443
+        target_port: 8443
+    - name: kubevirt-ipam-controller-webhook-service
+      labels:
+        app: ipam-virt-workloads
+        app.kubernetes.io/component: network
+        app.kubernetes.io/managed-by: cnao-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        networkaddonsoperator.network.kubevirt.io/version: sha256_46a381424df47a319ff358f9b7dcd36329f1949bc29f3f0699baa63d
+        prometheus.cnao.io: 'true'
+      ports:
+      - port: 443
+        target_port: 9443
+    - name: kubevirt-migration-prometheus
+      labels:
+        app: kubevirt-migration-controller
+        app.kubernetes.io/component: migration
+        app.kubernetes.io/managed-by: kubevirt-migration-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        migrations.kubevirt.io: ''
+        operator.migrations.kubevirt.io/createVersion: 4.21.8
+        operator.migrations.kubevirt.io/updateVersion: 4.22.9
+        prometheus.migrations.kubevirt.io: 'true'
+      ports:
+      - port: 8443
+        target_port: metrics
+    - name: kubevirt-operator-webhook
+      labels:
+        app.kubernetes.io/component: compute
+        app.kubernetes.io/managed-by: virt-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        kubevirt.io: ''
+        prometheus.kubevirt.io: 'true'
+      ports:
+      - port: 443
+        target_port: webhooks
+    - name: kubevirt-prometheus-metrics
+      labels:
+        app.kubernetes.io/component: compute
+        app.kubernetes.io/managed-by: virt-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        kubevirt.io: ''
+        prometheus.kubevirt.io: 'true'
+      ports:
+      - port: 443
+        target_port: metrics
+    - name: ssp-operator-metrics
+      labels:
+        app.kubernetes.io/component: service-controller
+        app.kubernetes.io/managed-by: ssp-operator-services
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        metrics.ssp.kubevirt.io: ssp-operator-metrics
+        prometheus.ssp.kubevirt.io: 'true'
+      ports:
+      - port: 443
+        target_port: http-metrics
+    - name: ssp-operator-service
+      labels:
+        olm.managed: 'true'
+        operators.coreos.com/kubevirt-hyperconverged.openshift-cnv: ''
+      ports:
+      - port: 9443
+        target_port: 9443
+    - name: template-validator-metrics
+      labels:
+        app.kubernetes.io/component: templating
+        app.kubernetes.io/managed-by: ssp-operator
+        app.kubernetes.io/name: template-validator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        metrics.ssp.kubevirt.io: template-validator-metrics
+        prometheus.ssp.kubevirt.io: 'true'
+      ports:
+      - port: 443
+        target_port: http-metrics
+    - name: virt-api
+      labels:
+        app.kubernetes.io/component: compute
+        app.kubernetes.io/managed-by: virt-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        kubevirt.io: virt-api
+      ports:
+      - port: 443
+        target_port: 8443
+    - name: virt-exportproxy
+      labels:
+        app.kubernetes.io/component: compute
+        app.kubernetes.io/managed-by: virt-operator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        kubevirt.io: virt-exportproxy
+      ports:
+      - port: 443
+        target_port: 8443
+    - name: virt-template-validator
+      labels:
+        app.kubernetes.io/component: templating
+        app.kubernetes.io/managed-by: ssp-operator
+        app.kubernetes.io/name: template-validator
+        app.kubernetes.io/part-of: hyperconverged-cluster
+        app.kubernetes.io/version: 4.22.9
+        kubevirt.io: virt-template-validator
+      ports:
+      - port: 443
+        target_port: 9443
+  nodes:
+  - name: d38-h09-000-r660
+    labels:
+      kubernetes.io/hostname: d38-h09-000-r660
+    free_cpu: 109016.740797
+    free_mem: 520200675328.0
+    taints:
+    - node-role.kubernetes.io/master:NoSchedule
+  - name: d39-h03-000-r660
+    labels:
+      kubernetes.io/hostname: d39-h03-000-r660
+    free_cpu: 110089.940966
+    free_mem: 502186364928.0
+  - name: d38-h19-000-r660
+    labels:
+      kubernetes.io/hostname: d38-h19-000-r660
+    free_cpu: 110319.605295
+    free_mem: 517031092224.0
+  - name: d38-h08-000-r660
+    labels:
+      kubernetes.io/hostname: d38-h08-000-r660
+    free_cpu: 110402.882917
+    free_mem: 519618498560.0
+    taints:
+    - node-role.kubernetes.io/master:NoSchedule
+  - name: d39-h02-000-r660
+    labels:
+      kubernetes.io/hostname: d39-h02-000-r660
+    free_cpu: 110180.991368
+    free_mem: 506473492480.0
+  - name: d38-h18-000-r660
+    labels:
+      kubernetes.io/hostname: d38-h18-000-r660
+    free_cpu: 110056.0578
+    free_mem: 504368869376.0
+  - name: d39-h05-000-r660
+    labels:
+      kubernetes.io/hostname: d39-h05-000-r660
+    free_cpu: 110169.659847
+    free_mem: 503457480704.0
+  - name: d38-h07-000-r660
+    labels:
+      kubernetes.io/hostname: d38-h07-000-r660
+    free_cpu: 110783.538715
+    free_mem: 524677292032.0
+    taints:
+    - node-role.kubernetes.io/master:NoSchedule
+  - name: d39-h04-000-r660
+    labels:
+      kubernetes.io/hostname: d39-h04-000-r660
+    free_cpu: 109736.724224
+    free_mem: 509099917312.0
+  - name: d39-h01-000-r660
+    labels:
+      kubernetes.io/hostname: d39-h01-000-r660
+    free_cpu: 110023.4726
+    free_mem: 498629001216.0
+  - name: d39-h06-000-r660
+    labels:
+      kubernetes.io/hostname: d39-h06-000-r660
+    free_cpu: 110147.750836
+    free_mem: 506379534336.0
+  - name: d39-h07-000-r660
+    labels:
+      kubernetes.io/hostname: d39-h07-000-r660
+    free_cpu: 110215.595429
+    free_mem: 506524848128.0
+  - name: d39-h08-000-r660
+    labels:
+      kubernetes.io/hostname: d39-h08-000-r660
+    free_cpu: 109789.340666
+    free_mem: 500034007040.0
