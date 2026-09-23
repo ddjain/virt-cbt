@@ -1,20 +1,22 @@
 ---
-skill: cbt-e2e-test
-model: sonnet
+name: cbt-test
 description: >
   End-to-end test runner for the ODF CBT Fedora VM validator: create a VM
   pool, take a baseline Full backup, take a second Incremental (CBT) backup,
   run guest+backup verification, then analyze the results using the
   physical qcow2-header evidence (never VirtualMachineBackup.status) to
   confirm CBT genuinely worked. Produces a clear pass/fail summary with the
-  supporting evidence.
-trigger: >
-  Use when the user wants to test, exercise, or demonstrate this repo's CBT
-  workflow end-to-end — e.g. "test this workflow", "run the CBT pipeline",
-  "create a VM and verify CBT backups", "demo CBT backup", "run e2e test".
-  Also use after making changes to scripts/odf-vm-validator.sh,
-  scripts/cbt-evidence-check.sh, or the kube-burner templates, to confirm
-  the change didn't break the pipeline.
+  supporting evidence. Use when the user wants to test, exercise, or
+  demonstrate this repo's CBT workflow end-to-end — e.g. "test this
+  workflow", "run the CBT pipeline", "create a VM and verify CBT backups",
+  "demo CBT backup", "run e2e test", "cbt-test". Also use after making
+  changes to scripts/odf-vm-validator.sh, scripts/cbt-evidence-check.sh,
+  or the kube-burner templates, to confirm the change didn't break the
+  pipeline.
+compatibility: >
+  Requires oc, virtctl, kube-burner, jq, bash 4+, and KUBECONFIG access to
+  an OpenShift + ODF cluster. On macOS, put /opt/homebrew/bin ahead of /bin
+  in PATH (system bash is 3.2).
 ---
 
 # CBT End-to-End Test Runner
@@ -125,7 +127,7 @@ signal that CBT tracked *your* changes specifically (not just "some"
 incremental), write a known file to the guest between steps 3 and 4 first:
 
 ```bash
-make ssh VM=<vm-name> CMD='sudo -n dd if=/dev/urandom of=/data/cbt-e2e-marker bs=1M count=8 conv=fsync'
+make ssh VM=<vm-name> CMD='sudo -n dd if=/dev/urandom of=/data/cbt-test-marker bs=1M count=8 conv=fsync'
 ```
 
 ## Step 5 — Verification
