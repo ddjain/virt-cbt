@@ -91,11 +91,11 @@ Create a generic OpenShift Virtualization VM whose data disk is provisioned by O
 
 ### Procedure
 
+Use the kube-burner-driven pool creation (the only supported path — see
+`kube-burner/templates/fedora-cbt-vm.yml` / `fedora-cbt-secret.yml`):
+
 ```bash
-oc create namespace cbt-demo --dry-run=client -o yaml | oc apply -f -
-oc apply -f manifests/fedora-cbt-vm.yaml
-oc apply -f manifests/backup-pvc.yaml
-oc wait --for=condition=Ready vm/fedora-cbt-vm -n cbt-demo --timeout=300s
+make density-setup N=1
 ```
 
 ### Expected evidence
