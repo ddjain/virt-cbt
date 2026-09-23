@@ -10,7 +10,7 @@ $(error specify only one of N or n)
 endif
 endif
 
-.PHONY: help init-config generate-keys check-prereqs density-setup density-status density-teardown discover-vms backup cbt-backup cbt-payload-proof verify status ssh report list-reports e2e
+.PHONY: help init-config generate-keys check-prereqs density-setup density-status density-teardown discover-vms backup cbt-backup cbt-payload-proof cbt-evidence verify status ssh report list-reports e2e
 
 help:
 	@printf '%s\n' \
@@ -32,6 +32,7 @@ help:
 	  '  make list-reports                        List reports newest first' \
 	  '  make e2e N=2                             Setup, full, CBT and verify' \
 	  '  make cbt-payload-proof                  Prove CBT using incremental QCOW2 contents' \
+	  '  make cbt-evidence VMS=a,b|N=2|SELECTOR=k=v|ALL=1  Chaos-safe check: verify existing Full/CBT backups from qcow2 backing-file metadata, not .status' \
 	  '' \
 	  'Selection is exactly one of VMS=csv, N=count, SELECTOR=k=v, or ALL=1.'
 
@@ -82,3 +83,6 @@ e2e:
 	@$(SCRIPT) --config $(CONFIG) e2e $(if $(N),--count $(N),$(if $(n),--count $(n),))
 cbt-payload-proof:
 	@$(SCRIPT) --config $(CONFIG) cbt-payload-proof
+
+cbt-evidence:
+	@$(SCRIPT) --config $(CONFIG) cbt-evidence $(if $(VMS),--vms $(VMS),$(if $(N),--count $(N),$(if $(n),--count $(n),$(if $(SELECTOR),--selector $(SELECTOR),$(if $(ALL),--all,)))))

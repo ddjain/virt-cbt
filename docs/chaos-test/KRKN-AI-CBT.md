@@ -138,10 +138,11 @@ oc apply -f manifests/incremental-backup.yaml
 ```
 
 The wrapper fails if `Progressing=True` is not observed within 600 seconds; it
-never substitutes an arbitrary sleep. Krkn-AI then invokes the discovered
-`kubevirt-outage` candidate against the VMI. The generated Krkn command can be
-inspected in the result log; it must contain `--namespace cbt-demo`,
-`--vm-name fedora-cbt-vm`, and `--kill-count 1`.
+never substitutes an arbitrary sleep. After Krkn-AI returns, it waits for this
+same VMB to reach `Done=True`, `Complete=True`, or `Failed=True` (default
+completion timeout 600 seconds) before capturing VMB/VMBT state and classifying
+the outcome. Krkn-AI invokes the discovered `kubevirt-outage` candidate against
+the VMI; the generated Krkn command can be inspected in the result log.
 
 For a full-backup injection, create an equivalent uniquely named VMB whose
 tracker is empty, change `VMB_NAME`, and run the same procedure. Do not reuse a

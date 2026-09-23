@@ -9,9 +9,10 @@ VM_NAME=${VM_NAME:-fedora-cbt-vm}
 TRACKER_NAME=${TRACKER_NAME:-fedora-cbt-tracker}
 OUTPUT_DIR=${OUTPUT_DIR:-./cbt-results}
 TRIGGER_TIMEOUT=${TRIGGER_TIMEOUT:-600}
+COMPLETION_TIMEOUT=${COMPLETION_TIMEOUT:-600}
 
 usage() {
-  printf '%s\n' "Usage: $0 --scenario NAME [runner options] [-- scenario flags...]"
+  printf '%s\n' "Usage: $0 --scenario NAME [--completion-timeout SEC] [runner options] [-- scenario flags...]"
 }
 
 scenario_args=()
@@ -26,6 +27,7 @@ while (($#)); do
     --vm) VM_NAME=${2:?missing value for --vm}; shift 2 ;;
     --tracker) TRACKER_NAME=${2:?missing value for --tracker}; shift 2 ;;
     --trigger-timeout) TRIGGER_TIMEOUT=${2:?missing value for --trigger-timeout}; shift 2 ;;
+    --completion-timeout) COMPLETION_TIMEOUT=${2:?missing value for --completion-timeout}; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) scenario_args+=("$1"); shift ;;
   esac
@@ -37,6 +39,25 @@ KRKNCTL_KUBECONFIG=${KRKNCTL_KUBECONFIG:-$KUBECONFIG}
 command -v oc >/dev/null || { echo 'oc is required' >&2; exit 127; }
 command -v krknctl >/dev/null || { echo 'krknctl is required' >&2; exit 127; }
 command -v jq >/dev/null || { echo 'jq is required' >&2; exit 127; }
+
+[[ $COMPLETION_TIMEOUT =~ ^[1-9][0-9]*$ ]] || {
+  echo 'completion timeout must be a positive integer' >&2
+  exit 2
+}
+
+wait_for_backup_terminal() {
+  local deadline=$((SECONDS + COMPLETION_TIMEOUT))
+  while ((SECONDS < deadline)); do
+    if oc get virtualmachinebackup "$VMB_NAME" -n "$NAMESPACE" -o json 2>/dev/null |
+        jq -e '(.status.conditions // []) | any(.[]; (.type == "Done" or .type == "Complete" or .type == "Failed") and .status == "True")' >/dev/null; then
+      echo "VirtualMachineBackup/$VMB_NAME reached a terminal condition"
+      return 0
+    fi
+    sleep 5
+  done
+  echo "ERROR: VirtualMachineBackup/$VMB_NAME did not reach a terminal condition within ${COMPLETION_TIMEOUT}s" >&2
+  return 1
+}
 
 run_dir="$OUTPUT_DIR/$SCENARIO"
 mkdir -p "$run_dir"
@@ -60,6 +81,8 @@ krknctl run "$SCENARIO" \
   2>&1 | tee "$run_dir/krkn.log"
 krkn_rc=${PIPESTATUS[0]}
 set -e
+terminal_rc=0
+wait_for_backup_terminal || terminal_rc=$?
 
 oc get vm,vmi,pvc,virtualmachinebackup,virtualmachinebackuptracker,events \
   -n "$NAMESPACE" -o yaml > "$run_dir/cluster.yaml"
@@ -67,9 +90,13 @@ oc get virtualmachinebackup "$VMB_NAME" -n "$NAMESPACE" -o json > "$run_dir/vmb.
 oc get virtualmachinebackuptracker "$TRACKER_NAME" -n "$NAMESPACE" -o json > "$run_dir/tracker.json"
 
 NAMESPACE="$NAMESPACE" VM_NAME="$VM_NAME" VMB_NAME="$VMB_NAME" \
-TRACKER_NAME="$TRACKER_NAME" OUTPUT="$run_dir/cbt-result.json" \
+TRACKER_NAME="$TRACKER_NAME" BACKUP_PVC="${BACKUP_PVC:-cbt-backup-output}" \
+EXPECTED_TYPE="${EXPECTED_TYPE:-Incremental}" OUTPUT="$run_dir/cbt-result.json" \
 "$(dirname "$0")/classify-cbt-result.sh" || true
 
-printf 'scenario=%s krkn_returncode=%s result=%s\n' \
-  "$SCENARIO" "$krkn_rc" "$run_dir/cbt-result.json"
+printf 'scenario=%s krkn_returncode=%s terminal_wait_rc=%s result=%s\n' \
+  "$SCENARIO" "$krkn_rc" "$terminal_rc" "$run_dir/cbt-result.json"
+if ((terminal_rc != 0)); then
+  exit "$terminal_rc"
+fi
 exit "$krkn_rc"

@@ -15,7 +15,7 @@ if [[ -z $SSH_PUBLIC_KEY && -n $SSH_KEY && -r $SSH_KEY.pub ]]; then SSH_PUBLIC_K
 
 usage() { cat <<'EOF'
 Usage: odf-vm-validator.sh [--config FILE] COMMAND [options]
-Commands: generate-keys check-prereqs density-setup density-status density-teardown discover-vms backup cbt-backup cbt-payload-proof verify status ssh report list-reports e2e
+Commands: generate-keys check-prereqs density-setup density-status density-teardown discover-vms backup cbt-backup cbt-payload-proof cbt-evidence verify status ssh report list-reports e2e
 Selection options: --vms CSV | --count N | --selector key=value | --all
 EOF
 }
@@ -33,7 +33,16 @@ wait_pool() { local deadline=$((SECONDS+STABILIZE_TIMEOUT)) x; while ((SECONDS<d
 density_status() { if [[ ${COUNT_ONLY:-} == 1 ]]; then oc get vm -n "$NAMESPACE" -l "$VM_LABEL_SELECTOR" --no-headers | wc -l; elif [[ ${SUMMARY:-} == 1 ]]; then oc get vm -n "$NAMESPACE" -l "$VM_LABEL_SELECTOR" -o json | jq '{count:(.items|length),ready:([.items[]|select(.status.ready==true)]|length),cbtEnabled:([.items[]|select(.status.changedBlockTracking.state=="Enabled")]|length)}'; else oc get vm,vmi,pvc,virtualmachinebackuptracker -n "$NAMESPACE" -l "$VM_LABEL_SELECTOR" -o wide; fi; }
 density_teardown() { local owned; owned=$(oc get namespace "$NAMESPACE" -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}' 2>/dev/null || true); [[ $owned == odf-cbt-validator ]] || { echo "ERROR: refusing unowned namespace $NAMESPACE" >&2; return 1; }; oc delete namespace "$NAMESPACE" --wait=true; }
 discover() { if (($#==0)); then set -- --all; fi; parse_selection "$@"; if [[ ${COUNT_ONLY:-} == 1 ]]; then printf '%s\n' "${#selected[@]}"; else printf '%s\n' "${selected[@]}"; fi; }
-wait_backup() { local vm=$1 name=$2; oc wait --for=jsonpath='{.status.conditions[?(@.type=="Done")].status}'=True virtualmachinebackup/"$name" -n "$NAMESPACE" --timeout="${TIMEOUT}s" 2>/dev/null || oc wait --for=jsonpath='{.status.conditions[?(@.type=="Complete")].status}'=True virtualmachinebackup/"$name" -n "$NAMESPACE" --timeout="${TIMEOUT}s"; local typ; typ=$(oc get virtualmachinebackup "$name" -n "$NAMESPACE" -o json | jq -r '.status.type // empty'); [[ $typ == "$3" ]] || { echo "backup $name for $vm has type $typ, expected $3"; return 1; }; }
+wait_backup() {
+  # Only a synchronization barrier: waits for the VirtualMachineBackup job to
+  # reach a terminal condition. It intentionally does NOT assert .status.type
+  # — that field is controller-reported and cannot be trusted under chaos.
+  # Use cbt_backup_evidence for the actual Full-vs-Incremental verdict, which
+  # is read from the physical qcow2 backing-file metadata instead.
+  local vm=$1 name=$2
+  oc wait --for=jsonpath='{.status.conditions[?(@.type=="Done")].status}'=True virtualmachinebackup/"$name" -n "$NAMESPACE" --timeout="${TIMEOUT}s" 2>/dev/null || \
+    oc wait --for=jsonpath='{.status.conditions[?(@.type=="Complete")].status}'=True virtualmachinebackup/"$name" -n "$NAMESPACE" --timeout="${TIMEOUT}s"
+}
 backup_one() { local vm=$1 name=$2 tracker="$vm-tracker" pvc="$vm-backup-output"; local checkpoint; checkpoint=$(oc get virtualmachinebackuptracker "$tracker" -n "$NAMESPACE" -o json | jq -r '.status.latestCheckpoint // .status.checkpointName // empty'); [[ -z $checkpoint ]] || { echo "full backup already exists for $vm; use cbt-backup or recreate density"; return 1; }; oc delete virtualmachinebackup "$name" -n "$NAMESPACE" --ignore-not-found; cat <<EOF | oc apply -f -
 apiVersion: backup.kubevirt.io/v1alpha1
 kind: VirtualMachineBackup
@@ -44,7 +53,7 @@ spec:
   pvcName: $pvc
   skipQuiesce: true
 EOF
-wait_backup "$vm" "$name" Full; }
+wait_backup "$vm" "$name"; cbt_backup_evidence "$vm" "$name" Full; }
 cbt_one() { local vm=$1 name=$2 tracker="$vm-tracker" pvc="$vm-backup-output"; oc get virtualmachinebackup "$vm-full" -n "$NAMESPACE" >/dev/null; local before; before=$(oc get virtualmachinebackuptracker "$tracker" -n "$NAMESPACE" -o json | jq -r '.status.latestCheckpoint // .status.checkpointName // empty'); [[ -n $before ]] || { echo "no full checkpoint for $vm"; return 1; }; oc delete virtualmachinebackup "$name" -n "$NAMESPACE" --ignore-not-found; cat <<EOF | oc apply -f -
 apiVersion: backup.kubevirt.io/v1alpha1
 kind: VirtualMachineBackup
@@ -55,10 +64,10 @@ spec:
   pvcName: $pvc
   skipQuiesce: true
 EOF
-wait_backup "$vm" "$name" Incremental; local after; after=$(oc get virtualmachinebackuptracker "$tracker" -n "$NAMESPACE" -o json | jq -r '.status.latestCheckpoint // .status.checkpointName // empty'); [[ -n $after && $after != "$before" ]] || { echo "tracker did not advance for $vm"; return 1; }; }
+wait_backup "$vm" "$name"; cbt_backup_evidence "$vm" "$name" Incremental; }
 run_selected() { local action=$1; shift; parse_selection "$@"; start_report "$action"; local vm; for vm in "${selected[@]}"; do if [[ $action == backup ]]; then backup_one "$vm" "$vm-full" && record "$vm" PASS 'Full backup completed' || record "$vm" FAIL 'Full backup failed'; elif [[ $action == cbt-backup ]]; then sleep "$CBT_CHANGE_WAIT"; cbt_one "$vm" "$vm-incremental" && record "$vm" PASS 'Incremental backup completed' || record "$vm" FAIL 'Incremental backup failed'; else verify_one "$vm" && record "$vm" PASS 'VM, backup and guest checks passed' || record "$vm" FAIL 'Verification failed'; fi; done; ((failed==0)) && finish_report 0 || finish_report 1; }
 guest_check() { local vm=$1 output; [[ -n $SSH_KEY ]] || return 1; output=$(virtctl ssh -n "$NAMESPACE" -i "$SSH_KEY" --known-hosts=/dev/null --local-ssh-opts='-o' --local-ssh-opts='StrictHostKeyChecking=no' "$SSH_USER@vm/$vm" --command "test -f /data/vm-validator/workload.db -a -f /data/vm-validator/workload.log; mountpoint -q /data; sqlite3 /data/vm-validator/workload.db 'pragma integrity_check' | grep -qx ok; python3 -c \"import sqlite3,hashlib; c=sqlite3.connect('/data/vm-validator/workload.db'); r=c.execute('select seq,payload,digest from records order by seq').fetchall(); assert r and [x[0] for x in r]==list(range(1,len(r)+1)); assert all(hashlib.sha256(x[1].encode()).hexdigest()==x[2] for x in r)\"; echo GUEST_CHECK_OK"); grep -qx GUEST_CHECK_OK <<<"$output"; }
-verify_one() { local vm=$1; oc wait --for=jsonpath='{.status.ready}'=true vm/"$vm" -n "$NAMESPACE" --timeout="${TIMEOUT}s"; oc wait --for=jsonpath='{.status.phase}'=Running vmi/"$vm" -n "$NAMESPACE" --timeout="${TIMEOUT}s"; oc get vm "$vm" -n "$NAMESPACE" -o json | jq -e '.status.changedBlockTracking.state=="Enabled"' >/dev/null; oc get pvc "$vm-data" "$vm-backup-output" -n "$NAMESPACE" -o json | jq -e '[.items[].status.phase]|all(.=="Bound")' >/dev/null; wait_backup "$vm" "$vm-full" Full; wait_backup "$vm" "$vm-incremental" Incremental; guest_check "$vm"; sleep 2; guest_check "$vm"; }
+verify_one() { local vm=$1; oc wait --for=jsonpath='{.status.ready}'=true vm/"$vm" -n "$NAMESPACE" --timeout="${TIMEOUT}s"; oc wait --for=jsonpath='{.status.phase}'=Running vmi/"$vm" -n "$NAMESPACE" --timeout="${TIMEOUT}s"; oc get vm "$vm" -n "$NAMESPACE" -o json | jq -e '.status.changedBlockTracking.state=="Enabled"' >/dev/null; oc get pvc "$vm-data" "$vm-backup-output" -n "$NAMESPACE" -o json | jq -e '[.items[].status.phase]|all(.=="Bound")' >/dev/null; wait_backup "$vm" "$vm-full"; cbt_backup_evidence "$vm" "$vm-full" Full; wait_backup "$vm" "$vm-incremental"; cbt_backup_evidence "$vm" "$vm-incremental" Incremental; guest_check "$vm"; sleep 2; guest_check "$vm"; }
 status_selected() { if (($#==0)); then set -- --all; fi; parse_selection "$@"; printf '%-32s %-8s %-10s %-12s %-12s %-12s %s\n' VM READY PHASE CBT FULL INCREMENTAL CHECKPOINT; local vm full inc cp; for vm in "${selected[@]}"; do full=$(oc get virtualmachinebackup "$vm-full" -n "$NAMESPACE" -o json 2>/dev/null | jq -r '.status.type // .status.conditions[0].reason // "-"' 2>/dev/null) || full="-"; inc=$(oc get virtualmachinebackup "$vm-incremental" -n "$NAMESPACE" -o json 2>/dev/null | jq -r '.status.type // .status.conditions[0].reason // "-"' 2>/dev/null) || inc="-"; cp=$(oc get virtualmachinebackuptracker "$vm-tracker" -n "$NAMESPACE" -o json 2>/dev/null | jq -r '.status.latestCheckpoint // .status.checkpointName // "-"' 2>/dev/null) || cp="-"; printf '%-32s %-8s %-10s %-12s %-12s %-12s %s\n' "$vm" "$(oc get vm "$vm" -n "$NAMESPACE" -o jsonpath='{.status.ready}' 2>/dev/null || echo -)" "$(oc get vmi "$vm" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || echo -)" "$(oc get vm "$vm" -n "$NAMESPACE" -o jsonpath='{.status.changedBlockTracking.state}' 2>/dev/null || echo -)" "$full" "$inc" "$cp"; done; }
 ssh_guest() { local vm='' cmd=''; while (($#)); do case "$1" in --vm) vm=${2-}; shift 2;; --cmd) cmd=${2-}; shift 2;; *) return 2;; esac; done; [[ -n $vm && $vm == "$VM_PREFIX"-* ]] || { echo 'ERROR: VM is required and must use configured prefix' >&2; return 2; }; [[ -n $SSH_KEY ]] || { echo 'ERROR: SSH_KEY is required' >&2; return 2; }; virtctl ssh -n "$NAMESPACE" -i "$SSH_KEY" --known-hosts=/dev/null --local-ssh-opts='-o StrictHostKeyChecking=no' "$SSH_USER@vm/$vm" --command "${cmd:-hostname}"; }
 report() { local f; f=$(find "$REPORTS_DIR" -name summary.json -print | sort | sed -n '$p'); [[ -n $f ]] && cat "$f" || { echo 'No reports'; return 1; }; }
@@ -134,6 +143,50 @@ payload_has_nonzero_data_in_range() {
   jq -e --argjson start "$start" --argjson end "$end" \
     '[.[] | select(.data == true and .zero == false and .depth == 0) | select(.start < $end and (.start + .length) > $start)] | length > 0' \
     <<<"$map" >/dev/null
+}
+cbt_backup_evidence() {
+  # Determines whether a VirtualMachineBackup's resulting qcow2 is physically
+  # a Full (self-contained) or an Incremental (CBT-chained) artifact, by
+  # reading the artifact's own qemu-img metadata instead of trusting
+  # VirtualMachineBackup/.status, which is controller-reported and can be
+  # stale, racy, or wrong under chaos.
+  #
+  # Ground truth: a genuine CBT incremental is written by KubeVirt as a qcow2
+  # whose backing file is the disk's CBT overlay
+  # (.../libvirt/qemu/cbt/<disk>.qcow2), because its data only makes sense
+  # relative to the tracked dirty bitmap. A Full backup is self-contained and
+  # carries no backing file at all. This distinction is baked into the file
+  # at creation time and survives virt-launcher pods, nodes, or controllers
+  # being killed after the backup completes.
+  local vm=$1 name=$2 expected_type=$3
+  local evidence_dir=${run_dir:+$run_dir/evidence} evidence_json rc=0
+  [[ -n $evidence_dir ]] && mkdir -p "$evidence_dir"
+
+  evidence_json=$("$ROOT/scripts/cbt-evidence-check.sh" \
+    --namespace "$NAMESPACE" --vm "$vm" --backup "$name" \
+    --expected "$expected_type" --backup-pvc "$vm-backup-output" \
+    --timeout "$TIMEOUT") || rc=$?
+
+  [[ -n $evidence_dir ]] && printf '%s\n' "$evidence_json" >"$evidence_dir/$name-evidence.json"
+
+  if ((rc == 0)); then
+    jq -r '"CBT evidence: \(.backup) is physically \(.physicalType) (backing=\(.backingFile // "none")), allocated=\(.allocatedDataBytes)B — matches expected \(.expectedType)"' <<<"$evidence_json"
+    return 0
+  fi
+  jq -r '"ERROR: \(.backup) claims/expects \(.expectedType) but the qcow2 artifact is physically \(.physicalType) (backing=\(.backingFile // "none"))"' <<<"$evidence_json" >&2 2>/dev/null || \
+    echo "ERROR: physical evidence check failed for $name (expected $expected_type)" >&2
+  return 1
+}
+cbt_evidence_selected() {
+  parse_selection "$@"
+  start_report cbt-evidence
+  local vm
+  for vm in "${selected[@]}"; do
+    local ok=PASS msg='Full and Incremental artifacts match their physical CBT evidence'
+    cbt_backup_evidence "$vm" "$vm-full" Full && cbt_backup_evidence "$vm" "$vm-incremental" Incremental || { ok=FAIL; msg='Physical qcow2 evidence did not match expected backup type'; }
+    record "$vm" "$ok" "$msg"
+  done
+  ((failed==0)) && finish_report 0 || finish_report 1
 }
 cbt_payload_proof() {
   local stamp vm disk_bytes seed_bytes full_name inc_name control_name
@@ -287,4 +340,4 @@ EOF
   proof_report_done=1
 }
 case "$COMMAND" in
- help) usage;; generate-keys) generate_keys;; check-prereqs) check_prereqs;; density-setup) [[ ${ARGS[0]:-} == --count ]] && VM_COUNT=${ARGS[1]}; density_setup;; density-status) density_status;; density-teardown) density_teardown;; discover-vms) discover "${ARGS[@]}";; backup|cbt-backup|verify) run_selected "$COMMAND" "${ARGS[@]}";; cbt-payload-proof) cbt_payload_proof;; status) status_selected "${ARGS[@]}";; ssh) ssh_guest "${ARGS[@]}";; report) report;; list-reports) list_reports;; e2e) [[ ${ARGS[0]:-} == --count ]] && VM_COUNT=${ARGS[1]}; e2e "$VM_COUNT";; *) usage >&2; exit 2;; esac
+ help) usage;; generate-keys) generate_keys;; check-prereqs) check_prereqs;; density-setup) [[ ${ARGS[0]:-} == --count ]] && VM_COUNT=${ARGS[1]}; density_setup;; density-status) density_status;; density-teardown) density_teardown;; discover-vms) discover "${ARGS[@]}";; backup|cbt-backup|verify) run_selected "$COMMAND" "${ARGS[@]}";; cbt-payload-proof) cbt_payload_proof;; cbt-evidence) cbt_evidence_selected "${ARGS[@]}";; status) status_selected "${ARGS[@]}";; ssh) ssh_guest "${ARGS[@]}";; report) report;; list-reports) list_reports;; e2e) [[ ${ARGS[0]:-} == --count ]] && VM_COUNT=${ARGS[1]}; e2e "$VM_COUNT";; *) usage >&2; exit 2;; esac
