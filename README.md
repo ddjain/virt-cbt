@@ -2,7 +2,7 @@
 
 This repository provides a Fedora-only OpenShift Virtualization workload for validating ODF-backed KubeVirt CBT metadata. It follows the external-config, Make-driven pattern of [vmshift-validator](https://github.com/ddjain/vmshift-validator), using kube-burner to create deterministic VM density.
 
-The guest writes one UTC row per second to `/data/vm-validator/workload.db` and `/data/vm-validator/workload.log`. Rows contain sequence, random payload, and SHA-256 digest. Verification checks the ODF mount, SQLite integrity, contiguous rows, digests, service liveness, VM/VMI/CBT state, PVCs, and Full/Incremental backup metadata. This is not a restore test.
+The guest writes one UTC row per second to `/data/vm-validator/workload.db` and `/data/vm-validator/workload.log`. Rows contain sequence, random payload, and SHA-256 digest. Standard verification checks the ODF mount, SQLite integrity, contiguous rows, digests, service liveness, VM/VMI/CBT state, PVCs, and Full/Incremental backup metadata. `cbt-payload-proof` separately checks controlled changed-block output from the backup artifacts.
 
 ## Quick start
 
@@ -30,12 +30,13 @@ make density-teardown
 - `ssh VM=fedora-cbt-0 CMD='systemctl status vm-validator'` runs a guest command.
 - `report` prints the newest report; `list-reports` lists report directories newest first.
 - `e2e N=2` runs setup, Full backup, waits for new writes, Incremental backup, and verification without teardown.
+- `cbt-payload-proof` provisions a disposable, owned namespace; seeds known raw disk ranges; takes Full, Incremental, and forced-Full control backups; and checks depth-0 QCOW2 extents for the known canary range. It deletes the namespace afterward and retains JSON extent maps and metrics in the report.
 
 Each VM has its own `${vm}-data`, `${vm}-backup-output`, `${vm}-tracker`, `${vm}-full`, and `${vm}-incremental`. `BACKUP_CONCURRENCY` is reserved for bounded backup scheduling; results are isolated per VM under `REPORTS_DIR`.
 
 ## Reports and caveats
 
-Mutating and validation commands create `summary.json`, `run.log`, and `per-vm/*.json`. Reports contain resource verdicts but never kubeconfig or SSH material. Backup APIs and CBT status fields are release-dependent; the utility accepts `Done=True` or `Complete=True` while requiring Full then Incremental types. A successful backup CR proves control-plane completion and checkpoint progression, not restoreability. Add a restore-to-new-VM comparison for that claim.
+`virt-controller`'s “Setting incremental backup from checkpoint” log and `VirtualMachineBackup.status.type: Incremental` are control-plane signals, not proof of the data in the backup. `make cbt-payload-proof` checks selective changed-block output in the QCOW2 payload. Neither this nor standard verification proves arbitrary backup restoreability.
 
 ## Layout
 

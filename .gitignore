@@ -4,3 +4,5 @@ config.env
 keys/
 reports/
 kube-burner/rendered/
+kubeconfig
+kube-burner/kube-burner-*.log
