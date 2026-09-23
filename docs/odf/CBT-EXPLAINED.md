@@ -1,8 +1,11 @@
 # CBT (Changed Block Tracking) — Explained From Scratch
 
-This is written for someone who has never touched CBT before. It builds up from
-"what problem are we solving" to "how do we prove it under chaos", with ASCII
-diagrams at each step.
+This is written for someone who has never touched CBT before, and it stands
+on its own — it doesn't assume you're using any particular repo's tooling.
+It builds up from "what problem are we solving" to "how do you actually
+prove it works, even under chaos", using the real Kubernetes/KubeVirt
+objects, `oc`/`kubectl`, and `qemu-img` commands you'd type by hand, with
+ASCII diagrams at each step.
 
 ---
 
@@ -29,10 +32,11 @@ That "memory of which blocks changed" is what CBT (Changed Block Tracking) is.
 
 ## 2. Who remembers the changed blocks? QEMU dirty bitmaps
 
-Under the hood, your VM's disk is served by QEMU (the thing that actually runs
-the VM). QEMU has a built-in feature called a **dirty bitmap**: one bit per
-disk region (e.g. one bit per 256 KiB chunk). Whenever a write happens to a
-region, QEMU flips that bit to 1 ("dirty" = "changed since last backup").
+Under the hood, your VM's disk is served by QEMU (the process that actually
+runs the VM). QEMU has a built-in feature called a **dirty bitmap**: one bit
+per disk region (e.g. one bit per 256 KiB chunk). Whenever a write happens
+to a region, QEMU flips that bit to 1 ("dirty" = "changed since last
+backup").
 
 ```
 Disk blocks:     [0][1][2][3][4][5][6][7][8][9]
@@ -42,11 +46,11 @@ Dirty bitmap:      0  0  0  1  0  0  0  1  1  0
 ```
 
 When you take a backup, KubeVirt asks QEMU: "give me only the blocks marked
-dirty in this bitmap" → that's your incremental backup. Then the bitmap is
-cleared (or a new one starts) so it can track the *next* window of changes.
+dirty in this bitmap" → that's your incremental backup. Then a new bitmap
+starts, so it can track the *next* window of changes.
 
-A **checkpoint** is just a named snapshot-in-time of "the bitmap as of backup
-X". A chain of checkpoints looks like this:
+A **checkpoint** is just a named snapshot-in-time of "the bitmap as of
+backup X". A chain of checkpoints looks like this:
 
 ```
  checkpoint-1        checkpoint-2        checkpoint-3
@@ -100,45 +104,105 @@ If the overlay file gets corrupted or its bitmap is lost, KubeVirt still has
 your data — it just loses the ability to do an *incremental* backup and has
 to fall back to a full one.
 
+> **A tempting but unreliable idea:** since the overlay is "just a qcow2
+> file", can't you just read it directly (e.g. `qemu-img info` on it) to see
+> the bitmaps and prove the chain is healthy? In principle, yes. In
+> practice, while the VM is running, QEMU keeps the bitmap contents mostly
+> in memory and only writes them back to that file on a clean close — so
+> inspecting the live file from the outside can show *no bitmaps at all*
+> even though CBT is working correctly. §7 covers a safer way to get the
+> same confidence without touching this file while the VM is up, and §9
+> covers a real incident that came from trying to read it live anyway.
+
 ---
 
-## 4. What actually happens when you run `make backup` / `make cbt-backup`
+## 4. What actually happens when you take a Full backup, then an Incremental
+
+Backups are driven by two Kubernetes custom resources KubeVirt provides:
+`VirtualMachineBackupTracker` (tracks the checkpoint chain for one VM) and
+`VirtualMachineBackup` (one backup job).
+
+First, a tracker (created once per VM):
+
+```yaml
+apiVersion: backup.kubevirt.io/v1alpha1
+kind: VirtualMachineBackupTracker
+metadata:
+  name: my-vm-tracker
+spec:
+  source: {apiGroup: kubevirt.io, kind: VirtualMachine, name: my-vm}
+```
+
+**Full backup:**
+
+```yaml
+apiVersion: backup.kubevirt.io/v1alpha1
+kind: VirtualMachineBackup
+metadata:
+  name: my-vm-full
+spec:
+  source: {apiGroup: backup.kubevirt.io, kind: VirtualMachineBackupTracker, name: my-vm-tracker}
+  mode: Push
+  pvcName: my-vm-backup-output   # a PVC you created beforehand to receive the copy
+  skipQuiesce: true
+```
 
 ```
-   You: make backup VMS=fedora-cbt-1        (FULL)
-        │
+$ kubectl apply -f full-backup.yaml
+$ kubectl wait --for=jsonpath='{.status.conditions[?(@.type=="Done")].status}'=True \
+    virtualmachinebackup/my-vm-full --timeout=600s
+```
+
+```
+   VirtualMachineBackup "my-vm-full" created ──► virt-launcher tells QEMU:
+        │                                        "start tracking a bitmap
+        │                                         called checkpoint-1,
+        │                                         then copy the WHOLE disk
+        │                                         out to my-vm-backup-output"
         ▼
-   VirtualMachineBackup CR created ──► virt-launcher tells QEMU:
-        │                              "start tracking a bitmap called
-        │                               checkpoint-1, then copy the
-        │                               WHOLE disk out to the backup PVC"
-        ▼
-   backup-output PVC now has:
-   fedora-cbt-1-full/checkpoint-1/fedora-cbt-1-full-datadisk.qcow2
+   my-vm-backup-output PVC now contains:
+   my-vm/checkpoint-1/my-vm-full-datadisk.qcow2
    (size ≈ full disk)
+```
 
+**Incremental backup** — same shape, referencing the same tracker (which
+now already has one checkpoint recorded):
 
-   You: make cbt-backup VMS=fedora-cbt-1     (INCREMENTAL)
-        │
+```yaml
+apiVersion: backup.kubevirt.io/v1alpha1
+kind: VirtualMachineBackup
+metadata:
+  name: my-vm-incremental
+spec:
+  source: {apiGroup: backup.kubevirt.io, kind: VirtualMachineBackupTracker, name: my-vm-tracker}
+  mode: Push
+  pvcName: my-vm-backup-output
+  skipQuiesce: true
+```
+
+```
+   VirtualMachineBackup "my-vm-incremental" created ──► virt-launcher tells QEMU:
+        │                                              "give me everything
+        │                                               dirty since
+        │                                               checkpoint-1, call
+        │                                               this batch
+        │                                               checkpoint-2"
         ▼
-   VirtualMachineBackup CR created ──► virt-launcher tells QEMU:
-        │                              "give me everything dirty
-        │                               since checkpoint-1, call this
-        │                               batch checkpoint-2"
-        ▼
-   backup-output PVC now has:
-   fedora-cbt-1-incremental/checkpoint-2/..-datadisk.qcow2
+   my-vm-backup-output PVC now also contains:
+   my-vm/checkpoint-2/my-vm-incremental-datadisk.qcow2
    (size ≈ only the changed bytes — should be MUCH smaller than full)
 ```
 
-This is exactly what `make cbt-payload-proof` measures: it seeds known bytes,
-takes a full backup, changes a *known, small* region, takes an incremental,
-and then checks with `qemu-img map` (a tool that shows which byte ranges are
-actually allocated in a qcow2 file) that:
+You can watch the resulting file sizes directly. Exec into (or `oc debug`) a
+pod that has the backup PVC mounted, and run:
 
-- the incremental file contains the new bytes,
-- the incremental file does **not** contain the old, already-backed-up bytes,
-- the incremental is much smaller than a full backup of the same disk.
+```
+$ qemu-img map --output=json --force-share my-vm-full-datadisk.qcow2
+$ qemu-img map --output=json --force-share my-vm-incremental-datadisk.qcow2
+```
+
+`qemu-img map` lists which byte ranges in the file actually hold data
+(as opposed to being unallocated/zero). A healthy pair looks like:
 
 ```
 qemu-img map output (simplified)
@@ -146,7 +210,8 @@ qemu-img map output (simplified)
 Full backup map:        [DATA][DATA][DATA][DATA][DATA][DATA] ← everything
 Incremental map:        [    ][    ][    ][DATA][    ][    ] ← only the
                                             ^^^^              changed part
-                                       our canary write
+                                       one small write you made
+                                       between the two backups
 ```
 
 That's proof by *physical bytes on disk*, not by trusting a status message
@@ -156,14 +221,14 @@ that says "Completed".
 
 ## 5. Why "trust the status field" is dangerous once you add chaos
 
-Normally, KubeVirt's controller keeps a friendly status:
+Normally, the tracker keeps a friendly status:
 
 ```
 VirtualMachineBackupTracker.status.latestCheckpoint = checkpoint-2   ✅ looks fine
 ```
 
-But now imagine we're chaos-testing: we kill the virt-launcher pod (simulate
-a node crash) *while* a CBT backup is in flight, or right after.
+But now imagine you're chaos-testing: you kill the virt-launcher pod
+(simulate a node crash) *while* a CBT backup is in flight, or right after.
 
 ```
                      💥 chaos: virt-launcher pod killed
@@ -173,13 +238,13 @@ a node crash) *while* a CBT backup is in flight, or right after.
                           closed cleanly ("in-use" / dirty-open state)
                           │
                           ▼
-   virt-launcher pod restarts ──► KubeVirt tries RedefineCheckpoint()
-                          │                to reattach the old bitmap
-                          │                to the new QEMU process
+   virt-launcher pod restarts ──► KubeVirt tries to reattach ("redefine")
+                          │                the old bitmap to the new
+                          │                QEMU process
                           │
                ┌──────────┴──────────┐
                ▼                     ▼
-         succeeds cleanly      FAILS (HTTP 422)
+         succeeds cleanly      FAILS
                │                     │
                ▼                     ▼
       chain continues        tracker.status.latestCheckpoint
@@ -203,23 +268,24 @@ just broke.**
 
 ## 6. The status-independent check: read the qcow2's own header
 
-The resulting *backup* qcow2 (the one sitting in `backup-output` PVC after a
-backup finishes) is just a file. `qemu-img info` decodes its header —
-no privileges needed, no need to even open the file it's chained to:
+The resulting *backup* qcow2 (the one sitting in the backup PVC after a
+backup finishes) is just a file. `qemu-img info` decodes its header — no
+privileges needed, and critically, no need to even open the file it points
+to:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  inspector pod (read-only mount of the backup-output PVC     │
-│  ONLY — see the safety note below for why)                   │
+│  inspector pod (read-only mount of ONLY the backup PVC —      │
+│  see §9 for why "only")                                        │
 │                                                                │
-│   $ qemu-img info --output=json fedora-cbt-1-incremental-datadisk.qcow2
+│   $ qemu-img info --output=json --force-share my-vm-incremental-datadisk.qcow2
 │   {                                                             │
 │     "backing-filename":                                        │
 │       "/var/run/kubevirt-private/libvirt/qemu/cbt/datadisk.qcow2" │
 │     ...                                                         │
 │   }                                                             │
 │                                                                │
-│   $ qemu-img info --output=json fedora-cbt-1-full-datadisk.qcow2 │
+│   $ qemu-img info --output=json --force-share my-vm-full-datadisk.qcow2
 │   {  ...no "backing-filename" key at all...  }                  │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -227,73 +293,86 @@ no privileges needed, no need to even open the file it's chained to:
 One fact, read straight from the header, decides everything:
 
 - **Has a `backing-filename` pointing at `.../libvirt/qemu/cbt/<disk>.qcow2`?**
-  → this artifact is a genuine CBT **Incremental** — its bytes only make sense
-  chained to that bitmap overlay, so KubeVirt could not have produced this
-  file any other way.
+  → this artifact is a genuine CBT **Incremental** — its bytes only make
+  sense chained to that bitmap overlay, so it could not have been produced
+  any other way.
 - **No `backing-filename` at all?** → self-contained **Full** backup.
 - **Backing file points somewhere else?** → anomalous; treat as a failure.
 
-This is exactly what `scripts/cbt-evidence-check.sh` does, and it is the
-"correct way" this repo settled on. Two things worth calling out about *why*
-it looks this simple:
+Two things worth calling out about *why* this simple check is enough:
 
-1. **`qemu-img info` (no `--backing-chain`) never needs to open the backing
-   file.** It just reads the string out of the qcow2 header. That means this
-   check works even if the CBT overlay/bitmap PVC is completely unreachable
-   — which matters, because reaching it safely turned out to be the hard
-   part (see below).
-2. An earlier design for this check also tried to open the *live* CBT
-   overlay itself (to inspect QEMU's dirty-bitmap list and their `in-use`
-   flags) for extra chain-integrity evidence. That was dropped — not because
-   the idea was wrong in theory, but because doing it safely against a
-   *running* VM turned out to be unsafe in practice. See §8.
+1. **`qemu-img info` without `--backing-chain` never needs to open the
+   backing file.** It just reads the string out of the qcow2 header. That
+   means this check works even if the CBT overlay/bitmap file is completely
+   unreachable — which matters, because reaching it safely turns out to be
+   the hard part (§9).
+2. It's tempting to *also* want a size figure for the incremental — "how
+   many bytes actually changed?" — via `qemu-img map`. That works fine for
+   a Full backup (self-contained, nothing to open). For an Incremental,
+   `qemu-img map` needs to open the backing file to compute it accurately,
+   which reopens exactly the safety problem in §9. The pragmatic choice:
+   get the size for Full backups, and simply don't measure it for
+   Incrementals — you already have your correctness answer from the header
+   string alone, without needing the size.
 
 ---
 
 ## 7. Where this fits into chaos testing
 
 ```
-  1. make density-setup N=<count>          create the VM pool
-  2. make backup VMS=...                   baseline Full backup + evidence check
+  1. create the VM(s) and their VirtualMachineBackupTracker
+  2. take a baseline Full backup (§4) → verify it's physically Full (§6)
   3. ── inject chaos here ──►  kill virt-launcher / virt-handler /
-                                ceph OSD / network partition / node reboot
-  4. make cbt-backup VMS=...               Incremental backup taken during/after chaos
-  5. make cbt-evidence VMS=...             re-check Full+Incremental evidence any time
-                                            after chaos, independent of step 2/4's own
-                                            in-line checks (useful if you want to
-                                            re-verify later, e.g. after the controller
-                                            has had time to reconcile)
-     → PASS/FAIL decided by reading the backup qcow2's own header,
-       never VirtualMachineBackup.status or controller logs
-  6. record result (reports/<run>/summary.json + evidence/*.json), repeat with
-     different chaos scenarios
+                                a storage OSD / partition the network /
+                                reboot the node
+  4. take an Incremental backup (§4), during or right after the chaos
+  5. VALIDATE — read the Incremental qcow2's header (§6) at any point
+     afterward, independent of whether the chaos already ended:
+       → PASS/FAIL decided by reading the backup qcow2's own header,
+         never VirtualMachineBackup.status or controller logs
+  6. record the result, repeat with different chaos scenarios
 ```
 
-`make backup`/`make cbt-backup`/`make verify` already run the evidence check
-inline as part of the command. `make cbt-evidence` exists so you can re-run
-just the evidence check standalone, any time later, without redoing the
-backup — which is exactly the shape a chaos experiment needs ("inject chaos,
-then verify what actually happened, without disturbing it further").
+The evidence check in step 5 is deliberately separable from steps 2/4: you
+can run it inline right after each backup, and you can also re-run it
+standalone later, against backups that already exist, without redoing
+anything — which is exactly the shape a chaos experiment needs ("inject
+chaos, then verify what actually happened, without disturbing it further").
 
 ---
 
-## 8. How this was actually verified — including a mistake worth knowing about
+## 8. Proving the mechanism works at all, from first principles
 
-Verification happened in two stages against a real GCP OpenShift + ODF
-cluster, not in the abstract.
+Before trusting the header check in §6, it's worth proving to yourself, on
+a disposable VM, that CBT genuinely exports only changed bytes:
 
-**Stage 1 — prove the mechanism works at all (`make cbt-payload-proof`).**
-This spins up a disposable, throwaway VM, seeds two known byte ranges,
-takes a Full backup, writes a single new 4 MiB canary range, takes an
-Incremental backup, and inspects both resulting qcow2 files with
-`qemu-img map` (which byte ranges actually have data). A real run produced:
+1. Create a VM with a spare data disk (`/dev/vdb` or similar), with CBT
+   enabled on that disk (`changedBlockTracking: true` in its `VirtualMachine`
+   spec).
+2. Seed two known byte ranges on that disk with known data, e.g.:
+   ```
+   $ dd if=/dev/urandom of=/dev/vdb bs=1M count=128 seek=0   conv=fsync
+   $ dd if=/dev/urandom of=/dev/vdb bs=1M count=128 seek=512 conv=fsync
+   ```
+3. Take a Full backup (§4).
+4. Write one new, small "canary" range you haven't touched before, e.g. 4
+   MiB at offset 1 GiB.
+5. Take an Incremental backup (§4).
+6. Inspect both resulting qcow2 files with `qemu-img map --output=json
+   --force-share` and check: the Full contains both seeded ranges; the
+   Incremental contains the new 4 MiB canary range and *only* that range
+   (the two earlier seeded ranges must be absent from it).
+
+A real run of exactly this procedure produced:
 
 ```
 Full backup:         271,843,328 bytes allocated (both seeded ranges present)
 Incremental backup:    4,194,304 bytes allocated (exactly the canary write —
                                                     both older seeded ranges
                                                     correctly absent)
-Forced-full control: 276,037,632 bytes allocated (comparable to the real Full)
+Forced-full control: 276,037,632 bytes allocated (comparable to the real Full,
+                                                    taken with a "force full"
+                                                    flag as a sanity control)
 ```
 
 The incremental is ~65x smaller than a full backup of the same disk and
@@ -301,35 +380,59 @@ contains *only* the new bytes — proof, from physical file contents, that
 CBT is genuinely tracking and exporting only changed blocks, not silently
 copying everything.
 
-**Stage 2 — make the ongoing evidence check itself safe (`cbt-evidence-check.sh`).**
-This is where a real mistake happened and is worth recording so it isn't
-repeated: an earlier version of the check mounted the VM's CBT-overlay/state
-PVC into a *second* pod (to read live QEMU dirty-bitmap flags for extra
-evidence). On this cluster, attaching an RBD-backed PVC to a second pod **on
-the same node** as the running VM disrupted that node's other RBD mounts
-badly enough to pause the live VM twice with a genuine low-level I/O error
-— not a simulated chaos scenario, an actual incident caused by the
-verification tooling itself.
+---
 
-The fix, and the reason the final design in §6 looks the way it does:
+## 9. A real incident: how *not* to read the CBT overlay, and why
+
+This is worth reading even if you never build this check yourself, because
+the failure mode is non-obvious and destructive.
+
+An earlier design for the §6 check tried to gather *extra* evidence by also
+mounting the VM's live CBT-overlay/state PVC into a second, separate pod (to
+inspect QEMU's dirty-bitmap list and their `in-use` flags directly — the
+idea flagged as unreliable back in §3). That PVC is backed by Ceph RBD. On
+the cluster this was tested against, attaching an RBD-backed PVC to a
+**second pod on the same node** as the running VM disrupted that node's
+other RBD-backed mounts badly enough to pause the *live VM* with a genuine
+low-level I/O error — twice, reproducibly. This was not a simulated chaos
+scenario; it was a real incident caused by the verification tooling itself.
+
+```
+  second pod attaches the VM's live CBT-overlay PVC on the SAME node
+                          │
+                          ▼
+       node's RBD (Ceph block) client gets disrupted
+                          │
+                          ▼
+     the VM's own, unrelated data-disk PVC starts throwing I/O errors
+                          │
+                          ▼
+              QEMU pauses the VM: "low-level IO error detected"
+```
+
+The fix — and the reason §6's check only ever touches the backup PVC:
 
 - **Never mount the CBT-overlay/state PVC into a second pod at all.** It's
   genuinely still attached to the live VM; there is no safe way to read it
-  concurrently, and — per §6.1 — it isn't even necessary, since the backing
-  file *name* is enough to prove Incremental-vs-Full without ever opening
-  that file.
-- The evidence-check pod only ever mounts the `*-backup-output` PVC (never
-  attached to the live VM's own pod spec — it's hotplugged in transiently by
-  the backup controller and detached again once the backup finishes), and is
-  explicitly scheduled onto a **different node** than the VM as defense in
-  depth.
+  concurrently, and — per §6's second point — it isn't even necessary, since
+  the backing-file *name* alone is enough to prove Incremental-vs-Full
+  without ever opening that file.
+- The backup PVC is safe to mount from a second pod (it isn't part of the
+  VM's own pod spec — it's attached transiently, only while a backup is
+  actually copying data, and detached again afterward), but schedule that
+  inspector pod onto a **different node** than the VM as defense in depth,
+  in case some other storage interaction on that node has the same effect.
 
-After this fix, a full `make backup` → `make cbt-backup` → `make verify`
-cycle was re-run end-to-end against a live VM: the VM stayed `Running` /
-`ready: true` throughout, and both evidence checks passed
-(`fedora-cbt-1-full` → physically `Full`; `fedora-cbt-1-incremental` →
-physically `Incremental`, backed by
+After this fix, a full baseline-Full → Incremental → re-verify cycle was
+re-run end-to-end against a live VM: the VM stayed running and ready
+throughout, and both header checks passed (Full → no backing file;
+Incremental → backed by
 `/var/run/kubevirt-private/libvirt/qemu/cbt/datadisk.qcow2`) — this time
-without disturbing the VM at all. That's the standard the rest of this repo
-now holds itself to: verification tooling must be provably no more invasive
-than the thing it's trying to verify.
+without disturbing the VM at all.
+
+The general lesson, useful well beyond CBT: **verification tooling must be
+provably no more invasive than the thing it's trying to verify.** If proving
+something is correct requires touching a resource that's still live and
+in use, look for a way to prove it from something that *isn't* still live
+and in use — here, that was the finished backup file's own header, not the
+running VM's in-progress state.
