@@ -36,7 +36,7 @@ For selector changes, exercise sorted count selection, explicit names, duplicate
 
 Cloud-cluster validation is disposable and must use a unique namespace, the blue-cluster kubeconfig, and cleanup via a shell `trap`. Do not install software or change cluster-level ODF/CBT configuration as a fallback. macOS ships bash 3.2; these scripts need bash 4+ (`declare -A`) — put `/opt/homebrew/bin` ahead of `/bin` in `PATH` before running anything against a real cluster.
 
-For a full end-to-end exercise of this workflow against a live cluster (VM creation → Full backup → Incremental backup → verify → evidence-based result analysis), use the `cbt-e2e-test` skill (`.claude/skills/cbt-e2e-test/SKILL.md`) rather than improvising the command sequence — it encodes the ordering, the known_hosts/bash gotchas, and the safety rule about not mounting the CBT-overlay PVC from a second pod.
+For a full end-to-end exercise of this workflow against a live cluster (VM creation → Full backup → Incremental backup → verify → evidence-based result analysis), use the `cbt-test` skill (`.claude/skills/cbt-test/SKILL.md`) rather than improvising the command sequence — it encodes the ordering, the known_hosts/bash gotchas, and the safety rule about not mounting the CBT-overlay PVC from a second pod.
 
 ## Change workflow
 
