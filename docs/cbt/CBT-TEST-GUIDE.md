@@ -65,13 +65,33 @@ The verifier starts a short-lived read-only inspector pod on the VM's launcher n
 
 The command overwrites raw sectors only on its disposable test VM. It requires SSH configuration and a data disk of at least 2 GiB. The namespace is removed through the ownership-checked teardown path; reports and QCOW2 extent maps remain under `REPORTS_DIR`. This does not prove restoreability of arbitrary backups.
 
+## CBT restore proof (guest hash after Full+Incremental)
+
+```bash
+make cbt-restore-proof
+```
+
+Creates a disposable namespace (`cbt-restore-<timestamp>`), writes
+`/data/vm-validator/cbt-restore-proof.bin` and records `hash1`, takes a Full
+backup, appends more bytes and records `hash2`, takes an Incremental backup,
+rebases the Incremental qcow2 onto the Full artifact, converts the chain onto
+a new PVC, boots a restore VM from that PVC, and requires
+`restored_hash == hash2`. Tear-down of the disposable namespace is always
+attempted (success or failure). Defaults are large enough for mid-backup
+chaos injection (`RESTORE_PROOF_BASE_MIB=512`, `RESTORE_PROOF_APPEND_MIB=128`
+in `config.example.env`); override in `config.env` if needed.
+
+This is the recoverability check. It does not use `VirtualMachineRestore`
+(that API is for snapshots). It never mounts the source VM's data or
+CBT-overlay PVC.
+
 ## Guest invariant
 
 The service refuses to run unless `/data` is mounted. It writes `/data/vm-validator/workload.db` and `workload.log` every second. Verification checks the mount, SQLite integrity, contiguous sequence, digest correctness, and increasing sequence across two checks at least two seconds apart. This detects a stale guest or accidental writes to the container disk.
 
 ## Restore limitation and release differences
 
-The Push-mode backup API is release-dependent. The utility accepts either `Done=True` or `Complete=True`, but insists on `Full` for the baseline and `Incremental` for the next backup and requires tracker advancement. These checks do not restore a backup. A restore-to-new-VM test and guest checkpoint comparison are required to prove recoverability.
+The Push-mode backup API is release-dependent. The utility accepts either `Done=True` or `Complete=True`, but insists on `Full` for the baseline and `Incremental` for the next backup and requires tracker advancement. Standard `verify` / `cbt-evidence` do not restore a backup. Use `make cbt-restore-proof` for restore-to-new-VM + guest hash comparison.
 
 Conceptually, restore means applying the Full (+ Incremental) qcow2 chain from the backup-output PVC onto a new volume — **not** using the live CBT overlay. See [CBT-EXPLAINED.md §5.5](CBT-EXPLAINED.md#55-how-restore-works-conceptually).
 

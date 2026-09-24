@@ -216,6 +216,15 @@ make e2e N=2   # density-setup → backup → cbt-backup → verify → report,
   the fast per-VM check `cbt-evidence` gives you — and note it schedules an
   inspector pod on the *same* node as its throwaway VM, so keep it to
   disposable/non-critical environments.
+- **`make cbt-restore-proof`** — proves Push-mode Full+Incremental
+  **restoreability** with guest file hashes. Creates disposable namespace
+  `cbt-restore-<timestamp>`, writes `/data/vm-validator/cbt-restore-proof.bin`
+  (hash1) → Full backup → appends more bytes (hash2) → Incremental backup →
+  rebases the Incremental qcow2 onto the Full artifact (so convert never
+  needs the live CBT overlay) → `qemu-img convert` onto a new PVC → boots a
+  restore VM from that PVC → rehashes the file and requires
+  `restored_hash == hash2`. Never mounts the source VM's data or CBT-overlay
+  PVC. Always tears down its namespace afterward.
 
 ## How correctness is verified
 
@@ -269,5 +278,7 @@ docs/cbt/                               CBT architecture, ops, and test runbooks
 
 Standard `verify` and `cbt-evidence` prove the backup artifact is physically
 the type it claims to be and contains changed-block data. They do not prove
-arbitrary point-in-time **restore** works — that's a separate, not-yet-built
-check. See [docs/cbt/CBT-EXPLAINED.md §5.5](docs/cbt/CBT-EXPLAINED.md#55-how-restore-works-conceptually).
+arbitrary point-in-time **restore** works — use
+`make cbt-restore-proof` for that (guest file hash after Full+Incremental
+chain restore onto a new VM). See
+[docs/cbt/CBT-EXPLAINED.md §5.5](docs/cbt/CBT-EXPLAINED.md#55-how-restore-works-conceptually).
