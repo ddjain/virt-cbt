@@ -73,4 +73,6 @@ The service refuses to run unless `/data` is mounted. It writes `/data/vm-valida
 
 The Push-mode backup API is release-dependent. The utility accepts either `Done=True` or `Complete=True`, but insists on `Full` for the baseline and `Incremental` for the next backup and requires tracker advancement. These checks do not restore a backup. A restore-to-new-VM test and guest checkpoint comparison are required to prove recoverability.
 
+Conceptually, restore means applying the Full (+ Incremental) qcow2 chain from the backup-output PVC onto a new volume — **not** using the live CBT overlay. See [CBT-EXPLAINED.md §5.5](CBT-EXPLAINED.md#55-how-restore-works-conceptually).
+
 The older `manifests/` files remain fixtures for chaos-specific runbooks. They are not rendered by the density Make targets. Existing ODF installation and CBT architecture guidance remains in `docs/odf/` and `docs/cbt/CBT-OPERATIONS.md`.

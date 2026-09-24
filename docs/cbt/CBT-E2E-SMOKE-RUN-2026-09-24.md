@@ -283,3 +283,10 @@ Backup destination PVC:  fedora-cbt-1-backup-output
         = dirty blocks only since Full checkpoint
         = backing-filename points at CBT overlay → proves CBT was used
 ```
+
+For the full layered picture (QEMU ↔ VM ↔ disks ↔ overlay ↔ backup files)
+and how a Push-mode chain would be **restored** conceptually — including
+what you restore from vs what you must not — see
+[CBT-EXPLAINED.md §5](CBT-EXPLAINED.md#5-putting-it-together-qemu-the-vm-disks-backup-files-and-restore).
+This smoke run did **not** exercise restore; a green verify only proves the
+artifacts are physically Full / Incremental.

@@ -37,10 +37,9 @@ prerequisites, reading config) — just do those.
 Read these once at the start of a session, don't re-derive them:
 
 - `README.md` — what each `make` target creates and where.
-- `docs/odf/CBT-EXPLAINED.md` §6–8 — how correctness is actually verified
-  (qcow2 `backing-filename` header, never `.status`), and the real incident
-  that shaped the current safety design (never mount the CBT-overlay/state
-  PVC into a second pod while the VM is running).
+- `docs/cbt/CBT-EXPLAINED.md` §5 (layers / files / restore overview),
+  §7–§8 (header-based verification + chaos fit), and §10 (never mount the
+  live CBT-overlay/state PVC into a second pod while the VM is running).
 - `AGENTS.md` — project rules, in particular the safety rule above.
 
 ## Step 0 — Preflight
@@ -173,7 +172,7 @@ oc get vmi <vm-name> -n <namespace> -o jsonpath='{.status.conditions[?(@.type=="
 ```
 
 If the VMI is `Paused` with `reason: PausedIOError`, treat this as a
-potential real incident (see `docs/odf/CBT-EXPLAINED.md` §8) — do not just
+potential real incident (see `docs/cbt/CBT-EXPLAINED.md` §10) — do not just
 retry. Check what pods currently have a PVC mounted
 (`oc get pod <launcher> -o jsonpath='{.spec.volumes}'`) before creating any
 new pod that might mount the same or an adjacent PVC on the same node.
