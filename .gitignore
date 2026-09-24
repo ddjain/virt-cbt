@@ -9,3 +9,7 @@ reports/
 kube-burner/rendered/
 kubeconfig
 kube-burner/kube-burner-*.log
+
+# Local machine metadata
+.DS_Store
+.serena/
