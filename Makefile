@@ -21,13 +21,13 @@ help:
 	  '  make check-prereqs                       Validate tools, CRDs, ODF and CBT' \
 	  '  make density-setup N=2                   Create deterministic Fedora VM density' \
 	  '  make density-status [SUMMARY=1]          Show owned VM pool' \
-	  '  make density-teardown [ALL=1]            Delete config namespace, or all utility-owned namespaces' \
+	  '  make density-teardown [ALL=1 CONFIRM=1]  Delete config namespace, or all utility-owned (CONFIRM=1 required for ALL=1)' \
 	  '  make discover-vms [N=2|ALL=1]            List selected utility VMs' \
 	  '  make backup VMS=a,b|N=2|SELECTOR=k=v|ALL=1  Full backups' \
 	  '  make cbt-backup VMS=a,b|N=2|SELECTOR=k=v|ALL=1 Incremental backups' \
 	  '  make verify VMS=a,b|N=2|SELECTOR=k=v|ALL=1     Validate guests and backups' \
 	  '  make status [selection]                   Join VM, tracker and backup state' \
-	  '  make ssh VM=fedora-cbt-0 CMD="..."       Run a guest command' \
+	  '  make ssh VM=fedora-cbt-1 CMD="..."       Run a guest command' \
 	  '  make report                              Print newest JSON report' \
 	  '  make list-reports                        List reports newest first' \
 	  '  make e2e N=2                             Setup, full, CBT and verify' \
@@ -54,7 +54,7 @@ density-status:
 	@SUMMARY=$(SUMMARY) COUNT_ONLY=$(COUNT_ONLY) $(SCRIPT) --config $(CONFIG) density-status
 
 density-teardown:
-	@$(SCRIPT) --config $(CONFIG) density-teardown $(if $(ALL),--all,)
+	@CONFIRM=$(CONFIRM) $(SCRIPT) --config $(CONFIG) density-teardown $(if $(ALL),--all,)
 
 discover-vms:
 	@SUMMARY=$(SUMMARY) COUNT_ONLY=$(COUNT_ONLY) $(SCRIPT) --config $(CONFIG) discover-vms $(if $(VMS),--vms $(VMS),$(if $(N),--count $(N),$(if $(n),--count $(n),$(if $(SELECTOR),--selector $(SELECTOR),$(if $(ALL),--all,)))))
@@ -71,8 +71,10 @@ verify:
 status:
 	@$(SCRIPT) --config $(CONFIG) status $(if $(VMS),--vms $(VMS),$(if $(N),--count $(N),$(if $(n),--count $(n),$(if $(SELECTOR),--selector $(SELECTOR),$(if $(ALL),--all,)))))
 
+# Pass CMD via the environment so spaces in guest commands survive Make's
+# word-splitting (e.g. make ssh VM=fedora-cbt-1 CMD='echo hello world').
 ssh:
-	@$(SCRIPT) --config $(CONFIG) ssh --vm $(VM) $(if $(CMD),--cmd $(CMD),)
+	@CMD='$(CMD)' $(SCRIPT) --config $(CONFIG) ssh --vm '$(VM)'
 
 report:
 	@$(SCRIPT) --config $(CONFIG) report
@@ -82,6 +84,7 @@ list-reports:
 
 e2e:
 	@$(SCRIPT) --config $(CONFIG) e2e $(if $(N),--count $(N),$(if $(n),--count $(n),))
+
 cbt-payload-proof:
 	@$(SCRIPT) --config $(CONFIG) cbt-payload-proof
 

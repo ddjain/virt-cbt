@@ -36,13 +36,22 @@ set -euo pipefail
 #   cbt-evidence-check.sh --namespace NS --vm VM --backup NAME \
 #     --expected Full|Incremental [--backup-pvc PVC] [--timeout SECONDS]
 #
-# Prints one JSON object to stdout and exits 0 if the physical evidence
-# matches --expected, exits 1 otherwise (including when the artifact or
-# pod cannot be inspected at all).
+# Prints one JSON object to stdout and exits:
+#   0 — physical evidence matches --expected
+#   1 — inspectable, but physical type does not match --expected
+#   2 — uninspectable (pod/artifact/qemu-img); treat as INCONCLUSIVE
 
 NAMESPACE='' VM='' BACKUP='' EXPECTED='' BACKUP_PVC='' TIMEOUT=${TIMEOUT:-300}
 
 usage() { printf '%s\n' "Usage: $0 --namespace NS --vm VM --backup NAME --expected Full|Incremental [--backup-pvc PVC] [--timeout SECONDS]"; }
+
+emit_inconclusive() {
+  local reason=$1
+  echo "ERROR: $reason" >&2
+  jq -n --arg vm "$VM" --arg name "$BACKUP" --arg expected "$EXPECTED" --arg reason "$reason" \
+    '{vm:$vm,backup:$name,expectedType:$expected,physicalType:"Unknown",backingFile:"",artifactPath:"",allocatedDataBytes:null,match:false,inspectable:false,reason:$reason}'
+  exit 2
+}
 
 while (($#)); do
   case "$1" in
@@ -66,11 +75,13 @@ pod="${BACKUP}-evidence"
 cleanup() { oc delete pod "$pod" -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
-image=$(oc get pods -A -o json | jq -er \
-  '[.items[] | select(.metadata.name | startswith("virt-launcher-")) | .spec.containers[] | select(.name=="compute") | .image][0]') || {
-  echo 'ERROR: no virt-launcher pod found cluster-wide to source a qemu-img-capable image' >&2
-  exit 1
-}
+image=$(oc get pods -n "$NAMESPACE" -o json 2>/dev/null | jq -er --arg prefix "virt-launcher-$VM-" \
+  '[.items[] | select(.metadata.name | startswith($prefix)) | .spec.containers[] | select(.name=="compute") | .image][0]' 2>/dev/null) || true
+if [[ -z ${image:-} ]]; then
+  image=$(oc get pods -n "$NAMESPACE" -o json 2>/dev/null | jq -er \
+    '[.items[] | select(.metadata.name | startswith("virt-launcher-")) | .spec.containers[] | select(.name=="compute") | .image][0]' 2>/dev/null) || true
+fi
+[[ -n ${image:-} ]] || emit_inconclusive "no virt-launcher pod in namespace $NAMESPACE to source a qemu-img-capable image"
 
 # Keep the inspector off the VM's current node: attaching the backup PVC on
 # the same node the VM's disks are already mapped on is what triggered a
@@ -104,39 +115,32 @@ $affinity
     volumeMounts: [{name: backup, mountPath: /proof, readOnly: true}]
   volumes: [{name: backup, persistentVolumeClaim: {claimName: $BACKUP_PVC}}]
 EOF
-oc wait --for=condition=Ready "pod/$pod" -n "$NAMESPACE" --timeout="${TIMEOUT}s" >/dev/null || {
-  echo "ERROR: evidence inspector pod for $BACKUP did not become Ready" >&2
-  exit 1
-}
+oc wait --for=condition=Ready "pod/$pod" -n "$NAMESPACE" --timeout="${TIMEOUT}s" >/dev/null || \
+  emit_inconclusive "evidence inspector pod for $BACKUP did not become Ready"
 
-# Prefer the artifact directory that matches this VMB's checkpointName.
+# Require the artifact directory that matches this VMB's checkpointName.
 # Reusing the same VirtualMachineBackup name (delete + recreate) leaves older
 # checkpoint dirs on the backup PVC; picking "newest by sort" can attribute a
-# later Incremental to an earlier Full (or vice versa).
+# later Incremental to an earlier Full (or vice versa) — so we never fall back.
 checkpoint=$(oc get virtualmachinebackup "$BACKUP" -n "$NAMESPACE" -o jsonpath='{.status.checkpointName}' 2>/dev/null || true)
-if [[ -n $checkpoint ]]; then
-  path=$(oc exec -n "$NAMESPACE" "$pod" -c inspect -- sh -c \
-    "test -f /proof/$VM/$checkpoint/${BACKUP}-datadisk.qcow2 && echo /proof/$VM/$checkpoint/${BACKUP}-datadisk.qcow2")
-fi
-if [[ -z ${path:-} ]]; then
-  path=$(oc exec -n "$NAMESPACE" "$pod" -c inspect -- sh -c \
-    "find /proof/$VM -mindepth 2 -maxdepth 2 -name '${BACKUP}-datadisk.qcow2' 2>/dev/null | sort | tail -1")
-fi
-if [[ -z $path ]]; then
-  echo "ERROR: no backup artifact found on disk for $BACKUP (checked /proof/$VM in PVC $BACKUP_PVC)" >&2
-  exit 1
-fi
+[[ -n $checkpoint ]] || emit_inconclusive "VirtualMachineBackup/$BACKUP has no status.checkpointName; cannot locate artifact safely"
+path=$(oc exec -n "$NAMESPACE" "$pod" -c inspect -- sh -c \
+  "test -f /proof/$VM/$checkpoint/${BACKUP}-datadisk.qcow2 && echo /proof/$VM/$checkpoint/${BACKUP}-datadisk.qcow2" 2>/dev/null) || true
+[[ -n ${path:-} ]] || emit_inconclusive "no backup artifact at /proof/$VM/$checkpoint/${BACKUP}-datadisk.qcow2 in PVC $BACKUP_PVC"
 
 # A pod that just transitioned to Ready can briefly see an incompletely
 # settled RWO mount right after a prior inspector pod released the same
 # backup PVC (rapid unmount/mount churn between consecutive evidence
 # checks) — qemu-img then spuriously fails to resolve the backing file.
 # Retry a few times before treating it as a real anomaly.
+qemu_err=$(mktemp)
+trap 'rm -f "$qemu_err"; cleanup' EXIT
 qemu_img_retry() {
   local out='' rc=1 attempt=0
+  : >"$qemu_err"
   until ((rc == 0)) || ((attempt >= 5)); do
     ((attempt+=1))
-    if out=$(oc exec -n "$NAMESPACE" "$pod" -c inspect -- qemu-img "$@" 2>/tmp/qemu-img.err); then
+    if out=$(oc exec -n "$NAMESPACE" "$pod" -c inspect -- qemu-img "$@" 2>"$qemu_err"); then
       rc=0
     else
       rc=$?
@@ -145,7 +149,7 @@ qemu_img_retry() {
   done
   if ((rc != 0)); then
     echo "ERROR: 'qemu-img $*' failed on $path after $attempt attempts" >&2
-    cat /tmp/qemu-img.err >&2 2>/dev/null || true
+    cat "$qemu_err" >&2 2>/dev/null || true
     return 1
   fi
   printf '%s' "$out"
@@ -154,7 +158,8 @@ qemu_img_retry() {
 # Only ever `qemu-img info` (no --backing-chain): it reads the qcow2 header
 # — including the backing-filename string — without needing to open the
 # backing file, so it never requires touching the live CBT-overlay PVC.
-info=$(qemu_img_retry info --output=json --force-share "$path") || exit 1
+info=$(qemu_img_retry info --output=json --force-share "$path") || \
+  emit_inconclusive "qemu-img info failed for $path after retries"
 backing=$(jq -r '.["backing-filename"] // empty' <<<"$info")
 if [[ -n $backing && $backing =~ /libvirt/qemu/cbt/.*\.qcow2$ ]]; then
   physical_type=Incremental
@@ -181,6 +186,6 @@ match=false
 jq -n --arg vm "$VM" --arg name "$BACKUP" --arg expected "$EXPECTED" \
   --arg physical "$physical_type" --arg backing "$backing" --arg path "$path" \
   --argjson bytes "$bytes" --argjson match "$match" \
-  '{vm:$vm,backup:$name,expectedType:$expected,physicalType:$physical,backingFile:$backing,artifactPath:$path,allocatedDataBytes:$bytes,match:$match}'
+  '{vm:$vm,backup:$name,expectedType:$expected,physicalType:$physical,backingFile:$backing,artifactPath:$path,allocatedDataBytes:$bytes,match:$match,inspectable:true}'
 
 [[ $match == true ]]

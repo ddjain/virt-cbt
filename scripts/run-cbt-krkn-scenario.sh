@@ -10,6 +10,7 @@ TRACKER_NAME=${TRACKER_NAME:-fedora-cbt-tracker}
 OUTPUT_DIR=${OUTPUT_DIR:-./cbt-results}
 TRIGGER_TIMEOUT=${TRIGGER_TIMEOUT:-600}
 COMPLETION_TIMEOUT=${COMPLETION_TIMEOUT:-600}
+TIMEOUT=${TIMEOUT:-${COMPLETION_TIMEOUT}}
 
 usage() {
   printf '%s\n' "Usage: $0 --scenario NAME [--completion-timeout SEC] [runner options] [-- scenario flags...]"
@@ -62,7 +63,7 @@ wait_for_backup_terminal() {
 run_dir="$OUTPUT_DIR/$SCENARIO"
 mkdir -p "$run_dir"
 
-oc delete virtualmachinebackup "$VMB_NAME" -n "$NAMESPACE" --ignore-not-found --wait=true
+oc delete virtualmachinebackup "$VMB_NAME" -n "$NAMESPACE" --ignore-not-found --wait=true --timeout="${TIMEOUT}s"
 oc apply -f "$MANIFEST"
 
 trigger_command='oc get virtualmachinebackup '"$VMB_NAME"' -n '"$NAMESPACE"' -o json | jq -e '\''.status.conditions // [] | any(.[]; .type == "Progressing" and .status == "True")'\'''
@@ -84,19 +85,36 @@ set -e
 terminal_rc=0
 wait_for_backup_terminal || terminal_rc=$?
 
-oc get vm,vmi,pvc,virtualmachinebackup,virtualmachinebackuptracker,events \
-  -n "$NAMESPACE" -o yaml > "$run_dir/cluster.yaml"
+# Dump cluster state for diagnostics; redact Secret data/stringData.
+{
+  oc get vm,vmi,pvc,virtualmachinebackup,virtualmachinebackuptracker,events \
+    -n "$NAMESPACE" -o yaml 2>/dev/null || true
+  oc get secret -n "$NAMESPACE" -o yaml 2>/dev/null |
+    sed -E 's/(^[[:space:]]*(data|stringData):)/\1 <redacted>/; /^[[:space:]]+[A-Za-z0-9_./-]+:[[:space:]]+[A-Za-z0-9+/=]+$/d' || true
+} > "$run_dir/cluster.yaml"
 oc get virtualmachinebackup "$VMB_NAME" -n "$NAMESPACE" -o json > "$run_dir/vmb.json"
 oc get virtualmachinebackuptracker "$TRACKER_NAME" -n "$NAMESPACE" -o json > "$run_dir/tracker.json"
 
+classify_rc=0
 NAMESPACE="$NAMESPACE" VM_NAME="$VM_NAME" VMB_NAME="$VMB_NAME" \
 TRACKER_NAME="$TRACKER_NAME" BACKUP_PVC="${BACKUP_PVC:-cbt-backup-output}" \
 EXPECTED_TYPE="${EXPECTED_TYPE:-Incremental}" OUTPUT="$run_dir/cbt-result.json" \
-"$(dirname "$0")/classify-cbt-result.sh" || true
+"$(dirname "$0")/classify-cbt-result.sh" || classify_rc=$?
 
-printf 'scenario=%s krkn_returncode=%s terminal_wait_rc=%s result=%s\n' \
-  "$SCENARIO" "$krkn_rc" "$terminal_rc" "$run_dir/cbt-result.json"
+classification=$(jq -r '.classification // "unknown"' "$run_dir/cbt-result.json" 2>/dev/null || echo unknown)
+
+printf 'scenario=%s krkn_returncode=%s terminal_wait_rc=%s classify_rc=%s classification=%s result=%s\n' \
+  "$SCENARIO" "$krkn_rc" "$terminal_rc" "$classify_rc" "$classification" "$run_dir/cbt-result.json"
+
+# Prefer the most severe failure: terminal wait, then hard classify fail,
+# then inconclusive, then krkn itself.
 if ((terminal_rc != 0)); then
   exit "$terminal_rc"
+fi
+if ((classify_rc == 1)); then
+  exit 1
+fi
+if ((classify_rc == 2)); then
+  exit 2
 fi
 exit "$krkn_rc"
