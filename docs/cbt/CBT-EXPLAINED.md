@@ -351,8 +351,9 @@ Want the disk as of Incremental-2?
 
 Restore outline:
   1. Create an empty target PVC (or volume)
-  2. Apply the qcow2 chain onto it (e.g. qemu-img convert / rebase
-     of Full + the Incrementals you need)
+  2. Rebase the Incremental's backing-filename from the live CBT overlay
+     path onto the Full backup qcow2 (`qemu-img rebase -u`), then
+     `qemu-img convert` the chain onto the target (e.g. `disk.img`)
   3. Attach that volume to a new VM (or replace the old data PVC)
      and boot; verify guest data independently
 ```
@@ -373,10 +374,14 @@ RESTORE FROM THESE                          DO NOT RESTORE FROM THESE
 
 KubeVirt's `VirtualMachineRestore` API restores **snapshots**, not these
 Push-mode CBT payloads. A production consumer (backup product) is expected
-to own retention, transport, encryption, and restore. Until this repo adds
-an explicit restore-to-new-VM check, do not treat a green `verify` as proof
-of recoverability — only as proof that the artifacts are the CBT type they
-claim to be (see also `CBT-TEST-GUIDE.md` § "Restore limitation").
+to own retention, transport, encryption, and restore.
+
+This repo implements that outline as **`make cbt-restore-proof`**: write a
+known file and record `hash1` → Full backup → append and record `hash2` →
+Incremental backup → convert Full+Incremental onto a new PVC (never
+mounting the source data/CBT PVCs) → boot a disposable restore VM → require
+`sha256(restored file) == hash2`. A green `verify` alone is still only proof
+of artifact *type*, not recoverability.
 
 ---
 
