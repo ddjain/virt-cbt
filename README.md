@@ -10,7 +10,7 @@ matters because this tooling is meant to sit inside a chaos-testing loop
 resulting backup actually correct?") where the status/logs come from the
 exact components chaos is trying to break.
 
-New to CBT? Read **[docs/odf/CBT-EXPLAINED.md](docs/odf/CBT-EXPLAINED.md)**
+New to CBT? Read **[docs/cbt/CBT-EXPLAINED.md](docs/cbt/CBT-EXPLAINED.md)**
 first — it explains what CBT is, where KubeVirt actually stores it, and
 exactly how this repo verifies it, with diagrams and real numbers from a
 live run (including a real incident hit while building the verification
@@ -178,12 +178,15 @@ Each report directory contains `run.log` (full command transcript),
 ### 8. Tear down
 
 ```bash
-make density-teardown
+make density-teardown          # config.env NAMESPACE only
+make density-teardown ALL=1    # every namespace labeled odf-cbt-validator
 ```
 
-Deletes the namespace — but only if it's labeled
-`app.kubernetes.io/managed-by=odf-cbt-validator` (refuses otherwise, so it
-can never delete a namespace this tooling didn't create).
+Deletes utility-owned namespaces only (label
+`app.kubernetes.io/managed-by=odf-cbt-validator`). Without `ALL=1` it
+targets `NAMESPACE` from the config; with `ALL=1` it finds and deletes
+every matching namespace (VMs, PVCs, backups, trackers go with them).
+Refuses any namespace that lacks the ownership label.
 
 ### All-in-one
 
@@ -216,7 +219,7 @@ make e2e N=2   # density-setup → backup → cbt-backup → verify → report,
 
 ## How correctness is verified
 
-Full write-up: **[docs/odf/CBT-EXPLAINED.md](docs/odf/CBT-EXPLAINED.md)**.
+Full write-up: **[docs/cbt/CBT-EXPLAINED.md](docs/cbt/CBT-EXPLAINED.md)**.
 Short version: a genuine CBT Incremental backup's qcow2 file has a
 `backing-filename` header field pointing at the VM's CBT bitmap overlay
 (`.../libvirt/qemu/cbt/<disk>.qcow2`); a Full backup has none. That's a
@@ -254,8 +257,9 @@ scripts/cbt-evidence-check.sh           the physical qcow2-header CBT proof (see
 scripts/run-cbt-krkn-scenario.sh        wraps a krknctl chaos scenario around a CBT backup
 scripts/classify-cbt-result.sh          classifies a chaos-scenario backup using cbt-evidence-check.sh
 manifests/                              fixtures for existing chaos runbooks
-docs/odf/CBT-EXPLAINED.md               CBT explained from scratch, with diagrams
-docs/cbt/                               release-dependent CBT/ODF runbooks
+docs/cbt/CBT-EXPLAINED.md               CBT explained from scratch, with diagrams
+docs/cbt/CBT-COMPONENT-DEPENDENCIES.md  per-component roles for CBT chaos/test planning
+docs/cbt/                               CBT architecture, ops, and test runbooks
 ```
 
 ## Caveats

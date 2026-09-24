@@ -30,6 +30,7 @@ make -n backup VMS=fedora-cbt-1,fedora-cbt-2
 make -n cbt-backup n=2
 make -n verify ALL=1
 make -n cbt-evidence ALL=1
+make -n density-teardown ALL=1
 ```
 
 For selector changes, exercise sorted count selection, explicit names, duplicate names, missing names, zero counts, over-sized counts, and multiple selection modes. For kube-burner changes, render a sample job and parse the resulting YAML. VM names produced by `density-setup` are 1-indexed (`<VM_PREFIX>-1` .. `<VM_PREFIX>-N`), not 0-indexed.

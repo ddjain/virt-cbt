@@ -24,7 +24,8 @@ make cbt-backup N=2
 make verify N=2
 make status ALL=1
 make report
-make density-teardown
+make density-teardown          # config NAMESPACE only
+# make density-teardown ALL=1  # every utility-owned namespace
 ```
 
 `N=2` and `n=2` select the first two utility-owned VM names in lexical order. The same selector must be used for Full, Incremental, and verify operations so they use the same trackers. Use `VMS=fedora-cbt-0,fedora-cbt-1` for an exact selection, `SELECTOR=some-label=value` for a label subset, or `ALL=1` for every managed VM. Selection is mandatory for backup and verification. Duplicate, missing, unowned, zero, or over-sized selections fail.

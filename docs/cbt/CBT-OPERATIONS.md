@@ -2,6 +2,8 @@
 
 This document is the operational companion to `CBT-ARCHITECTURE.md` and `CBT-TEST-GUIDE.md`. It describes every Kubernetes, KubeVirt, QEMU/libvirt, storage, node, network, and monitoring component involved in a KubeVirt-native Changed Block Tracking (CBT) backup.
 
+For a concise role-per-component inventory aimed at chaos/test planning (PVCs, overlays, pods, storage, network, injection order), see `CBT-COMPONENT-DEPENDENCIES.md`.
+
 The commands are written for OpenShift (`oc`). Replace namespaces and names with the values used by the target cluster.
 
 ## Scope and version warning
