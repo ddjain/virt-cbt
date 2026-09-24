@@ -175,6 +175,14 @@ Each report directory contains `run.log` (full command transcript),
 `evidence/<backup-name>-evidence.json` with the raw qcow2-header findings
 (`physicalType`, `backingFile`, `allocatedDataBytes`, `match`).
 
+For `backup` / `cbt-backup` (and ad-hoc `make cbt-diagnostics`), each run
+also writes a forensic bundle under
+`diagnostics/<vm>/<backup-name>/` — CR YAML, filtered events, and
+virt-controller / virt-handler / virt-launcher logs for the backup window.
+This is for post-mortem analysis only; pass/fail stays on the qcow2 evidence.
+Disable with `CBT_DIAGNOSTICS=0`; set `CBT_DIAGNOSTICS_DEPTH=storage` to also
+capture CSI node logs and StorageCluster/CephCluster status.
+
 ### 8. Tear down
 
 ```bash
@@ -208,6 +216,11 @@ make e2e N=2   # density-setup → backup → cbt-backup → verify → report,
   environment so spaces survive Make word-splitting.
 - **`make status [selection]`** — one table joining VM readiness, CBT state,
   and each VM's Full/Incremental/checkpoint status (defaults to `--all`).
+- **`make cbt-diagnostics [selection]`** — ad-hoc forensic dump for existing
+  `<vm>-full` / `<vm>-incremental` backups (CR YAML + controller/handler/launcher
+  logs). Same bundle shape as the automatic dump written during
+  `make backup` / `make cbt-backup`. Does not take new backups and does not
+  decide Full vs Incremental correctness.
 - **`make cbt-payload-proof`** — the heavyweight, from-first-principles
   proof that CBT works at all. Creates its **own disposable namespace**
   (`cbt-proof-<timestamp>`) with **one throwaway VM**, seeds two known byte
@@ -256,12 +269,22 @@ reports/run-<UTC timestamp>-<command>/
 ├── per-vm/<vm>.json                 {vm, status: PASS|FAIL|INCONCLUSIVE, message}
 ├── summary.json                     {runId, command, namespace, selected,
 │                                      passed, failed, inconclusive, results: [...]}
-└── evidence/<backup-name>-evidence.json   {vm, backup, expectedType,
-                                             physicalType, backingFile,
-                                             artifactPath,
-                                             allocatedDataBytes, match,
-                                             inspectable}
+├── evidence/<backup-name>-evidence.json   {vm, backup, expectedType,
+│                                             physicalType, backingFile,
+│                                             artifactPath,
+│                                             allocatedDataBytes, match,
+│                                             inspectable}
+└── diagnostics/<vm>/<backup-name>/  forensic dump (backup/cbt-backup; also
+      ├── manifest.json                make cbt-diagnostics). Not used for pass/fail.
+      ├── baseline.json                pre-apply tracker/VMI CBT snapshot
+      ├── crs/                         VM/VMI/PVC/VMB/VMBT/pods/events YAML
+      ├── cluster/                     vmb.json, tracker.json, vmi-cbt.json, HCO snippet
+      ├── logs/                        virt-controller, virt-handler (VMI node),
+      │                                launcher describe+compute, filtered events
+      └── storage/                     only when CBT_DIAGNOSTICS_DEPTH=storage
 ```
+
+Kill-switch: `CBT_DIAGNOSTICS=0`. Depth: `CBT_DIAGNOSTICS_DEPTH=core|storage`.
 
 ## Layout
 
@@ -271,6 +294,7 @@ kube-burner/templates/fedora-cbt-vm.yml Fedora VM manifest (disks, CBT, workload
 scripts/select-vms.sh                   shared deterministic VM selector
 scripts/odf-vm-validator.sh             lifecycle, backup, verify, reports (the `make` targets)
 scripts/cbt-evidence-check.sh           the physical qcow2-header CBT proof (see above)
+scripts/cbt-diagnostics-collect.sh      forensic CR/log dump around one VMB (forensics only)
 scripts/run-cbt-krkn-scenario.sh        wraps a krknctl chaos scenario around a CBT backup
 scripts/classify-cbt-result.sh          classifies a chaos-scenario backup using cbt-evidence-check.sh
 manifests/                              fixtures for existing chaos runbooks

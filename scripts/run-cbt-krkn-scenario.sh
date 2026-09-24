@@ -64,6 +64,7 @@ run_dir="$OUTPUT_DIR/$SCENARIO"
 mkdir -p "$run_dir"
 
 oc delete virtualmachinebackup "$VMB_NAME" -n "$NAMESPACE" --ignore-not-found --wait=true --timeout="${TIMEOUT}s"
+t0=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 oc apply -f "$MANIFEST"
 
 trigger_command='oc get virtualmachinebackup '"$VMB_NAME"' -n '"$NAMESPACE"' -o json | jq -e '\''.status.conditions // [] | any(.[]; .type == "Progressing" and .status == "True")'\'''
@@ -85,15 +86,32 @@ set -e
 terminal_rc=0
 wait_for_backup_terminal || terminal_rc=$?
 
-# Dump cluster state for diagnostics; redact Secret data/stringData.
-{
-  oc get vm,vmi,pvc,virtualmachinebackup,virtualmachinebackuptracker,events \
-    -n "$NAMESPACE" -o yaml 2>/dev/null || true
-  oc get secret -n "$NAMESPACE" -o yaml 2>/dev/null |
-    sed -E 's/(^[[:space:]]*(data|stringData):)/\1 <redacted>/; /^[[:space:]]+[A-Za-z0-9_./-]+:[[:space:]]+[A-Za-z0-9+/=]+$/d' || true
-} > "$run_dir/cluster.yaml"
-oc get virtualmachinebackup "$VMB_NAME" -n "$NAMESPACE" -o json > "$run_dir/vmb.json"
-oc get virtualmachinebackuptracker "$TRACKER_NAME" -n "$NAMESPACE" -o json > "$run_dir/tracker.json"
+# Shared forensic dump (CRs + controller/handler/launcher logs). Best-effort.
+diag_dir="$run_dir/diagnostics"
+mkdir -p "$diag_dir"
+"$(dirname "$0")/cbt-diagnostics-collect.sh" \
+  --namespace "$NAMESPACE" \
+  --vm "$VM_NAME" \
+  --backup "$VMB_NAME" \
+  --out-dir "$diag_dir" \
+  --since-time "$t0" \
+  --tracker "$TRACKER_NAME" \
+  --depth "${CBT_DIAGNOSTICS_DEPTH:-core}" || true
+
+# Keep legacy paths that classify/downstream tooling already expect.
+if [[ -r $diag_dir/cluster/vmb.json ]]; then
+  cp -f "$diag_dir/cluster/vmb.json" "$run_dir/vmb.json"
+else
+  oc get virtualmachinebackup "$VMB_NAME" -n "$NAMESPACE" -o json > "$run_dir/vmb.json" 2>/dev/null || true
+fi
+if [[ -r $diag_dir/cluster/tracker.json ]]; then
+  cp -f "$diag_dir/cluster/tracker.json" "$run_dir/tracker.json"
+else
+  oc get virtualmachinebackuptracker "$TRACKER_NAME" -n "$NAMESPACE" -o json > "$run_dir/tracker.json" 2>/dev/null || true
+fi
+if [[ -r $diag_dir/crs/cbt-diagnostics.yaml ]]; then
+  cp -f "$diag_dir/crs/cbt-diagnostics.yaml" "$run_dir/cluster.yaml"
+fi
 
 classify_rc=0
 NAMESPACE="$NAMESPACE" VM_NAME="$VM_NAME" VMB_NAME="$VMB_NAME" \

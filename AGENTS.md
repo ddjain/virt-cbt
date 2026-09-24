@@ -23,13 +23,14 @@ This repository contains Fedora-only OpenShift Virtualization and OpenShift Data
 Run focused checks before committing:
 
 ```bash
-bash -n scripts/odf-vm-validator.sh scripts/select-vms.sh scripts/cbt-evidence-check.sh scripts/classify-cbt-result.sh scripts/run-cbt-krkn-scenario.sh
+bash -n scripts/odf-vm-validator.sh scripts/select-vms.sh scripts/cbt-evidence-check.sh scripts/cbt-diagnostics-collect.sh scripts/classify-cbt-result.sh scripts/run-cbt-krkn-scenario.sh
 make help
 make -n density-setup N=2
 make -n backup VMS=fedora-cbt-1,fedora-cbt-2
 make -n cbt-backup n=2
 make -n verify ALL=1
 make -n cbt-evidence ALL=1
+make -n cbt-diagnostics ALL=1
 make -n cbt-restore-proof
 make -n density-teardown ALL=1 CONFIRM=1
 ```
