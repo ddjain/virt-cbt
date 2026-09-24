@@ -10,7 +10,7 @@ $(error specify only one of N or n)
 endif
 endif
 
-.PHONY: help init-config generate-keys check-prereqs density-setup density-status density-teardown discover-vms backup cbt-backup cbt-payload-proof cbt-restore-proof cbt-evidence verify status ssh report list-reports e2e
+.PHONY: help init-config generate-keys check-prereqs density-setup density-status density-teardown discover-vms backup cbt-backup cbt-payload-proof cbt-restore-proof cbt-evidence cbt-diagnostics verify status ssh report list-reports e2e
 
 help:
 	@printf '%s\n' \
@@ -34,6 +34,7 @@ help:
 	  '  make cbt-payload-proof                  Prove CBT using incremental QCOW2 contents' \
 	  '  make cbt-restore-proof                  Write+hash, Full, append+hash, Incremental, restore chain, rehash' \
 	  '  make cbt-evidence VMS=a,b|N=2|SELECTOR=k=v|ALL=1  Chaos-safe check: verify existing Full/CBT backups from qcow2 backing-file metadata, not .status' \
+	  '  make cbt-diagnostics VMS=a,b|N=2|SELECTOR=k=v|ALL=1  Forensic dump: CR YAML + controller/handler/launcher logs for existing Full/Incremental backups' \
 	  '' \
 	  'Selection is exactly one of VMS=csv, N=count, SELECTOR=k=v, or ALL=1.'
 
@@ -93,3 +94,6 @@ cbt-restore-proof:
 
 cbt-evidence:
 	@$(SCRIPT) --config $(CONFIG) cbt-evidence $(if $(VMS),--vms $(VMS),$(if $(N),--count $(N),$(if $(n),--count $(n),$(if $(SELECTOR),--selector $(SELECTOR),$(if $(ALL),--all,)))))
+
+cbt-diagnostics:
+	@$(SCRIPT) --config $(CONFIG) cbt-diagnostics $(if $(VMS),--vms $(VMS),$(if $(N),--count $(N),$(if $(n),--count $(n),$(if $(SELECTOR),--selector $(SELECTOR),$(if $(ALL),--all,)))))

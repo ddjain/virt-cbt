@@ -11,12 +11,13 @@ while (($#)); do case "$1" in --config) CONFIG=${2:?missing config}; shift 2;; -
 : "${DATA_STORAGE_CLASS:=ocs-storagecluster-ceph-rbd}"; : "${BACKUP_STORAGE_CLASS:=$DATA_STORAGE_CLASS}"; : "${TARGET_NODE:=}"
 : "${SSH_KEY:=}"; : "${SSH_PUBLIC_KEY:=}"; : "${SSH_USER:=fedora}"; : "${TIMEOUT:=600}"; : "${STABILIZE_TIMEOUT:=300}"; : "${CBT_CHANGE_WAIT:=5}"; : "${REPORTS_DIR:=reports}"
 : "${RESTORE_PROOF_BASE_MIB:=512}"; : "${RESTORE_PROOF_APPEND_MIB:=128}"
+: "${CBT_DIAGNOSTICS:=1}"; : "${CBT_DIAGNOSTICS_DEPTH:=core}"
 export KUBECONFIG=${KUBECONFIG:-}
 if [[ -z $SSH_PUBLIC_KEY && -n $SSH_KEY && -r $SSH_KEY.pub ]]; then SSH_PUBLIC_KEY=$(<"$SSH_KEY.pub"); fi
 
 usage() { cat <<'EOF'
 Usage: odf-vm-validator.sh [--config FILE] COMMAND [options]
-Commands: generate-keys check-prereqs density-setup density-status density-teardown[--all] discover-vms backup cbt-backup cbt-payload-proof cbt-restore-proof cbt-evidence verify status ssh report list-reports e2e
+Commands: generate-keys check-prereqs density-setup density-status density-teardown[--all] discover-vms backup cbt-backup cbt-payload-proof cbt-restore-proof cbt-evidence cbt-diagnostics verify status ssh report list-reports e2e
 Selection options: --vms CSV | --count N | --selector key=value | --all
 EOF
 }
@@ -30,7 +31,7 @@ start_report() {
   local cmd=$1
   run_id="run-$(date -u +%Y%m%dT%H%M%SZ)-$cmd"
   run_dir="$REPORTS_DIR/$run_id"
-  mkdir -p "$run_dir/per-vm"
+  mkdir -p "$run_dir/per-vm" "$run_dir/diagnostics"
   : >"$run_dir/run.log"
   exec > >(tee -a "$run_dir/run.log") 2>&1
   started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -245,13 +246,59 @@ wait_backup() {
     jq '{name:.metadata.name,type:.status.type,conditions:.status.conditions}' >&2 || true
   return 1
 }
+# Best-effort forensic dump around one VMB. Never affects pass/fail.
+collect_backup_diagnostics() {
+  local vm=$1 name=$2 since_time=$3 baseline_json=${4:-}
+  local out_dir args=()
+  [[ ${CBT_DIAGNOSTICS:-1} != 0 ]] || return 0
+  [[ -n ${run_dir:-} ]] || return 0
+  out_dir="$run_dir/diagnostics/$vm/$name"
+  mkdir -p "$out_dir"
+  args=(
+    --namespace "$NAMESPACE"
+    --vm "$vm"
+    --backup "$name"
+    --out-dir "$out_dir"
+    --depth "${CBT_DIAGNOSTICS_DEPTH:-core}"
+    --tracker "$vm-tracker"
+  )
+  [[ -n $since_time ]] && args+=(--since-time "$since_time")
+  [[ -n $baseline_json && -r $baseline_json ]] && args+=(--baseline-json "$baseline_json")
+  log INFO DIAG "Collecting CBT diagnostics → $out_dir"
+  "$ROOT/scripts/cbt-diagnostics-collect.sh" "${args[@]}" || \
+    log WARN DIAG "Diagnostics collection returned non-zero (ignored)"
+}
+write_backup_baseline() {
+  # Lightweight pre-apply snapshot for the diagnostics manifest.
+  # Best-effort: never fails the backup path. Avoids --argjson + shell-captured
+  # JSON (pretty-printed/multiline captures were producing "invalid JSON text").
+  local vm=$1 tracker=$2 out=$3
+  local checkpoint
+  checkpoint=$(oc get virtualmachinebackuptracker "$tracker" -n "$NAMESPACE" -o json 2>/dev/null |
+    jq -r '.status.latestCheckpoint // .status.checkpointName // empty' 2>/dev/null || true)
+  if ! oc get vmi "$vm" -n "$NAMESPACE" -o json 2>/dev/null |
+      jq -c --arg vm "$vm" --arg tracker "$tracker" --arg checkpoint "$checkpoint" \
+        --arg captured "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{vm:$vm,tracker:$tracker,latestCheckpoint:$checkpoint,capturedAt:$captured,
+          vmi:{phase:.status.phase,node:.status.nodeName,cbt:.status.changedBlockTracking}}' \
+        >"$out" 2>/dev/null; then
+    jq -nc --arg vm "$vm" --arg tracker "$tracker" --arg checkpoint "$checkpoint" \
+      --arg captured "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      '{vm:$vm,tracker:$tracker,latestCheckpoint:$checkpoint,capturedAt:$captured,vmi:{}}' \
+      >"$out" 2>/dev/null || printf '%s\n' '{}' >"$out"
+  fi
+  return 0
+}
 backup_one() {
   local vm=$1 name=$2 tracker="$vm-tracker" pvc="$vm-backup-output"
-  local checkpoint
+  local checkpoint t0 baseline wait_rc=0
   assert_owned_namespace || return 1
   checkpoint=$(oc get virtualmachinebackuptracker "$tracker" -n "$NAMESPACE" -o json | jq -r '.status.latestCheckpoint // .status.checkpointName // empty')
   [[ -z $checkpoint ]] || { echo "full backup already exists for $vm; use cbt-backup or recreate density"; return 1; }
   oc delete virtualmachinebackup "$name" -n "$NAMESPACE" --ignore-not-found --wait=true --timeout="${TIMEOUT}s"
+  t0=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  baseline=$(mktemp)
+  write_backup_baseline "$vm" "$tracker" "$baseline"
   cat <<EOF | oc apply -f -
 apiVersion: backup.kubevirt.io/v1alpha1
 kind: VirtualMachineBackup
@@ -262,16 +309,23 @@ spec:
   pvcName: $pvc
   skipQuiesce: true
 EOF
-  wait_backup "$vm" "$name"; cbt_backup_evidence "$vm" "$name" Full
+  wait_backup "$vm" "$name" || wait_rc=$?
+  collect_backup_diagnostics "$vm" "$name" "$t0" "$baseline"
+  rm -f "$baseline"
+  ((wait_rc == 0)) || return "$wait_rc"
+  cbt_backup_evidence "$vm" "$name" Full
 }
 cbt_one() {
   local vm=$1 name=$2 tracker="$vm-tracker" pvc="$vm-backup-output"
-  local before
+  local before t0 baseline wait_rc=0
   assert_owned_namespace || return 1
   oc get virtualmachinebackup "$vm-full" -n "$NAMESPACE" >/dev/null
   before=$(oc get virtualmachinebackuptracker "$tracker" -n "$NAMESPACE" -o json | jq -r '.status.latestCheckpoint // .status.checkpointName // empty')
   [[ -n $before ]] || { echo "no full checkpoint for $vm"; return 1; }
   oc delete virtualmachinebackup "$name" -n "$NAMESPACE" --ignore-not-found --wait=true --timeout="${TIMEOUT}s"
+  t0=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  baseline=$(mktemp)
+  write_backup_baseline "$vm" "$tracker" "$baseline"
   cat <<EOF | oc apply -f -
 apiVersion: backup.kubevirt.io/v1alpha1
 kind: VirtualMachineBackup
@@ -282,7 +336,31 @@ spec:
   pvcName: $pvc
   skipQuiesce: true
 EOF
-  wait_backup "$vm" "$name"; cbt_backup_evidence "$vm" "$name" Incremental
+  wait_backup "$vm" "$name" || wait_rc=$?
+  collect_backup_diagnostics "$vm" "$name" "$t0" "$baseline"
+  rm -f "$baseline"
+  ((wait_rc == 0)) || return "$wait_rc"
+  cbt_backup_evidence "$vm" "$name" Incremental
+}
+cbt_diagnostics_selected() {
+  # Ad-hoc forensic dump against existing Full and/or Incremental VMBs.
+  local vm i=0 total name
+  parse_selection "$@"
+  start_report cbt-diagnostics
+  total=${#selected[@]}
+  for vm in "${selected[@]}"; do
+    ((i+=1))
+    log INFO TEST "[$i/$total] cbt-diagnostics $vm"
+    for name in "$vm-full" "$vm-incremental"; do
+      if oc get virtualmachinebackup "$name" -n "$NAMESPACE" >/dev/null 2>&1; then
+        collect_backup_diagnostics "$vm" "$name" ""
+      else
+        log INFO DIAG "Skip $name (not found)"
+      fi
+    done
+    record "$vm" PASS 'Diagnostics collected for existing backups'
+  done
+  finish_report 0
 }
 run_selected() {
   local action=$1; shift
@@ -941,4 +1019,4 @@ EOF
   proof_report_done=1
 }
 case "$COMMAND" in
- help) usage;; generate-keys) generate_keys;; check-prereqs) check_prereqs;; density-setup) [[ ${ARGS[0]:-} == --count ]] && VM_COUNT=${ARGS[1]}; density_setup;; density-status) density_status;; density-teardown) density_teardown "${ARGS[@]}";; discover-vms) discover "${ARGS[@]}";; backup|cbt-backup|verify) run_selected "$COMMAND" "${ARGS[@]}";; cbt-payload-proof) cbt_payload_proof;; cbt-restore-proof) cbt_restore_proof;; cbt-evidence) cbt_evidence_selected "${ARGS[@]}";; status) status_selected "${ARGS[@]}";; ssh) ssh_guest "${ARGS[@]}";; report) report;; list-reports) list_reports;; e2e) [[ ${ARGS[0]:-} == --count ]] && VM_COUNT=${ARGS[1]}; e2e "$VM_COUNT";; *) usage >&2; exit 2;; esac
+ help) usage;; generate-keys) generate_keys;; check-prereqs) check_prereqs;; density-setup) [[ ${ARGS[0]:-} == --count ]] && VM_COUNT=${ARGS[1]}; density_setup;; density-status) density_status;; density-teardown) density_teardown "${ARGS[@]}";; discover-vms) discover "${ARGS[@]}";; backup|cbt-backup|verify) run_selected "$COMMAND" "${ARGS[@]}";; cbt-payload-proof) cbt_payload_proof;; cbt-restore-proof) cbt_restore_proof;; cbt-evidence) cbt_evidence_selected "${ARGS[@]}";; cbt-diagnostics) cbt_diagnostics_selected "${ARGS[@]}";; status) status_selected "${ARGS[@]}";; ssh) ssh_guest "${ARGS[@]}";; report) report;; list-reports) list_reports;; e2e) [[ ${ARGS[0]:-} == --count ]] && VM_COUNT=${ARGS[1]}; e2e "$VM_COUNT";; *) usage >&2; exit 2;; esac

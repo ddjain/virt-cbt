@@ -329,12 +329,21 @@ oc logs -n openshift-cnv daemonset/virt-handler --since=1h \
 oc describe pod -n "$NAMESPACE" -l kubevirt.io=virt-launcher
 ```
 
-For a failed backup, preserve before cleanup:
+For a failed backup, preserve before cleanup. Prefer the automated bundle
+written by `make backup` / `make cbt-backup` (or ad-hoc
+`make cbt-diagnostics`) under
+`reports/run-*/diagnostics/<vm>/<backup-name>/` — it already includes the CR
+YAML dump below plus filtered virt-controller / virt-handler / virt-launcher
+logs for the backup window (Secret values redacted). Manual equivalent:
 
 ```bash
 oc get vm,vmi,pvc,virtualmachinebackup,virtualmachinebackuptracker,events -n "$NAMESPACE" -o yaml > cbt-diagnostics.yaml
 oc get pods -n "$NAMESPACE" -o yaml >> cbt-diagnostics.yaml
 ```
+
+Do not decide Full-vs-Incremental correctness from these logs or from
+`VirtualMachineBackup.status` — use `make cbt-evidence` (qcow2
+`backing-filename`) instead.
 
 ## Minimum acceptance evidence
 

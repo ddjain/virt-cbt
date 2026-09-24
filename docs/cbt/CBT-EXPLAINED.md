@@ -505,6 +505,15 @@ standalone later, against backups that already exist, without redoing
 anything — which is exactly the shape a chaos experiment needs ("inject
 chaos, then verify what actually happened, without disturbing it further").
 
+For post-mortem analysis of *why* a backup behaved a certain way (controller
+fallback, attach failures, handler crashes), `make backup` / `make cbt-backup`
+also write a forensic bundle under
+`reports/run-*/diagnostics/<vm>/<backup-name>/` — CR YAML, filtered events,
+and virt-controller / virt-handler (VMI node) / virt-launcher logs for the
+backup window. Re-collect later with `make cbt-diagnostics`. Those logs are
+**forensics only**; they are never the Full-vs-Incremental pass/fail signal
+(§7). Disable with `CBT_DIAGNOSTICS=0`.
+
 ---
 
 ## 9. Proving the mechanism works at all, from first principles
