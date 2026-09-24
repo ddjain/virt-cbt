@@ -578,11 +578,14 @@ scenario; it was a real incident caused by the verification tooling itself.
 
 The fix — and the reason §7's check only ever touches the backup PVC:
 
-- **Never mount the CBT-overlay/state PVC into a second pod at all.** It's
-  genuinely still attached to the live VM; there is no safe way to read it
-  concurrently, and — per §7's second point — it isn't even necessary, since
-  the backing-file *name* alone is enough to prove Incremental-vs-Full
-  without ever opening that file.
+- **Never mount the CBT-overlay/state PVC into a second pod while the VM is
+  running.** It's genuinely still attached to the live VM; concurrent
+  second mounts caused real I/O pauses (see above). `cbt-payload-proof`
+  stops the disposable VM and waits until the VMI is gone before mounting
+  state/data for `qemu-img map`. Prefer `cbt-evidence` / `cbt-restore-proof`
+  for online-safe checks — those never need the live overlay at all, since
+  the backing-file *name* alone proves Incremental-vs-Full, and restore
+  rebases Incremental onto the Full artifact.
 - The backup PVC is safe to mount from a second pod (it isn't part of the
   VM's own pod spec — it's attached transiently, only while a backup is
   actually copying data, and detached again afterward), but schedule that

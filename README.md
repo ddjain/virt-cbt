@@ -197,11 +197,15 @@ make e2e N=2   # density-setup → backup → cbt-backup → verify → report,
 
 ## Other commands
 
+- **`make density-teardown [ALL=1 CONFIRM=1]`** — deletes the config
+  namespace, or every utility-owned namespace when `ALL=1` (requires
+  `CONFIRM=1`).
 - **`make discover-vms [N=2|ALL=1]`** — lists (or counts, with
   `COUNT_ONLY=1`) the VMs a selection would resolve to, without touching
   anything.
 - **`make ssh VM=fedora-cbt-1 CMD='...'`** — runs a command in the guest via
-  `virtctl ssh` (defaults to `hostname`).
+  `virtctl ssh` (defaults to `hostname`). `CMD` is passed via the
+  environment so spaces survive Make word-splitting.
 - **`make status [selection]`** — one table joining VM readiness, CBT state,
   and each VM's Full/Incremental/checkpoint status (defaults to `--all`).
 - **`make cbt-payload-proof`** — the heavyweight, from-first-principles
@@ -209,13 +213,11 @@ make e2e N=2   # density-setup → backup → cbt-backup → verify → report,
   (`cbt-proof-<timestamp>`) with **one throwaway VM**, seeds two known byte
   ranges on its data disk, takes a Full backup, writes one new small "canary"
   range, takes an Incremental *and* a forced-Full "control" backup, then
-  inspects all three qcow2 files with `qemu-img map` to prove the
-  Incremental contains only the canary bytes and is far smaller than a Full.
-  Always deletes its disposable namespace afterward (success or failure).
-  Use this when you want end-to-end proof of the underlying mechanism, not
-  the fast per-VM check `cbt-evidence` gives you — and note it schedules an
-  inspector pod on the *same* node as its throwaway VM, so keep it to
-  disposable/non-critical environments.
+  **stops the VM** (waits until the VMI is gone) before mounting state/data
+  PVCs into an inspector for `qemu-img map`. Always deletes its disposable
+  namespace afterward (success or failure). Prefer `cbt-restore-proof` +
+  `cbt-evidence` when you need online-safe checks that never touch live
+  CBT/data PVCs.
 - **`make cbt-restore-proof`** — proves Push-mode Full+Incremental
   **restoreability** with guest file hashes. Creates disposable namespace
   `cbt-restore-<timestamp>`, writes `/data/vm-validator/cbt-restore-proof.bin`
@@ -239,7 +241,8 @@ it via a short-lived, read-only inspector pod mounted **only** against the
 PVC — mounting either of those into a second pod while the VM is running
 was tried during development and caused a real I/O pause on the live VM; see
 §10 of CBT-EXPLAINED.md), scheduled onto a different node than the VM as
-defense in depth.
+defense in depth. Exit codes: `0` match, `1` type mismatch, `2`
+uninspectable (`INCONCLUSIVE`).
 
 Layers, backup-file layout, and how a Push-mode chain would be restored
 (conceptually) are in **§5** of the same doc.
@@ -249,13 +252,15 @@ Layers, backup-file layout, and how a Push-mode chain would be restored
 ```text
 reports/run-<UTC timestamp>-<command>/
 ├── run.log                          full stdout/stderr of the command
-├── per-vm/<vm>.json                 {vm, status: PASS|FAIL, message}
+├── summary.txt                      human-readable pass/fail/inconclusive counts
+├── per-vm/<vm>.json                 {vm, status: PASS|FAIL|INCONCLUSIVE, message}
 ├── summary.json                     {runId, command, namespace, selected,
-│                                      passed, failed, results: [...]}
+│                                      passed, failed, inconclusive, results: [...]}
 └── evidence/<backup-name>-evidence.json   {vm, backup, expectedType,
                                              physicalType, backingFile,
                                              artifactPath,
-                                             allocatedDataBytes, match}
+                                             allocatedDataBytes, match,
+                                             inspectable}
 ```
 
 ## Layout

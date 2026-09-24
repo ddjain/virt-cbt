@@ -27,11 +27,22 @@ tracker=$(oc get virtualmachinebackuptracker "$TRACKER_NAME" -n "$NAMESPACE" -o 
 # (.../libvirt/qemu/cbt/<disk>.qcow2); a Full backup is self-contained. This
 # fact is fixed at file-creation time, so it survives whatever chaos does to
 # pods/controllers afterwards.
+#
+# Evidence exit codes: 0=match, 1=mismatch, 2=uninspectable (INCONCLUSIVE).
 evidence_rc=0
 evidence=$("$(dirname "$0")/cbt-evidence-check.sh" \
   --namespace "$NAMESPACE" --vm "$VM_NAME" --backup "$VMB_NAME" \
   --expected "$EXPECTED_TYPE" --backup-pvc "$BACKUP_PVC") || evidence_rc=$?
 [[ -n $evidence ]] || evidence='{}'
+
+inspectable=true
+if ((evidence_rc == 2)); then
+  inspectable=false
+elif [[ $evidence == '{}' ]]; then
+  inspectable=false
+else
+  inspectable=$(jq -r 'if .inspectable == false then "false" else "true" end' <<<"$evidence")
+fi
 
 jq -n \
   --argjson vmb "$vmb" \
@@ -40,6 +51,7 @@ jq -n \
   --argjson tracker "$tracker" \
   --argjson evidence "$evidence" \
   --argjson evidenceOk "$([[ $evidence_rc -eq 0 ]] && echo true || echo false)" \
+  --argjson inspectable "$([[ $inspectable == true ]] && echo true || echo false)" \
   --arg namespace "$NAMESPACE" \
   --arg vm_name "$VM_NAME" \
   --arg vmb_name "$VMB_NAME" \
@@ -54,8 +66,10 @@ jq -n \
   def physical_type: ($evidence.physicalType // "Unknown");
   # classification is decided from evidenceOk (physical qcow2 evidence) plus
   # cluster health, never from reported_type/done/failed alone.
+  # inconclusive = could not measure (infra/API/inspect failure).
   def classification:
-    if evidenceOk and vmi_running then "pass"
+    if ($inspectable | not) then "inconclusive"
+    elif evidenceOk and vmi_running then "pass"
     elif (physical_type == "Full") and vmi_running and not failed then "safe_full_fallback"
     elif failed then "bounded_failure"
     else "fail"
@@ -69,15 +83,21 @@ jq -n \
     physicalType: physical_type,
     evidence: $evidence,
     evidenceOk: evidenceOk,
+    inspectable: $inspectable,
     done: done,
     failed: failed,
     vmiRunning: vmi_running,
     checkpoint: checkpoint,
     classification: classification,
     pass: (classification == "pass"),
-    accepted: (classification == "pass" or classification == "safe_full_fallback"),
-    score: (if classification == "pass" then 1 elif classification == "safe_full_fallback" then 0 elif classification == "bounded_failure" then 0 else -1 end)
+    accepted: (classification == "pass" or classification == "safe_full_fallback" or classification == "bounded_failure"),
+    score: (if classification == "pass" then 1 elif classification == "safe_full_fallback" then 0 elif classification == "bounded_failure" then 0 elif classification == "inconclusive" then 0 else -1 end)
   }
 ' | tee "$OUTPUT"
 
-jq -e '.classification == "pass" or .classification == "safe_full_fallback" or .classification == "bounded_failure"' "$OUTPUT" >/dev/null
+classification=$(jq -r '.classification' "$OUTPUT")
+case "$classification" in
+  pass|safe_full_fallback|bounded_failure) exit 0 ;;
+  inconclusive) exit 2 ;;
+  *) exit 1 ;;
+esac
