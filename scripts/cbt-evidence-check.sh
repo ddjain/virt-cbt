@@ -109,8 +109,19 @@ oc wait --for=condition=Ready "pod/$pod" -n "$NAMESPACE" --timeout="${TIMEOUT}s"
   exit 1
 }
 
-path=$(oc exec -n "$NAMESPACE" "$pod" -c inspect -- sh -c \
-  "find /proof/$VM -mindepth 2 -maxdepth 2 -name '${BACKUP}-datadisk.qcow2' 2>/dev/null | sort | tail -1")
+# Prefer the artifact directory that matches this VMB's checkpointName.
+# Reusing the same VirtualMachineBackup name (delete + recreate) leaves older
+# checkpoint dirs on the backup PVC; picking "newest by sort" can attribute a
+# later Incremental to an earlier Full (or vice versa).
+checkpoint=$(oc get virtualmachinebackup "$BACKUP" -n "$NAMESPACE" -o jsonpath='{.status.checkpointName}' 2>/dev/null || true)
+if [[ -n $checkpoint ]]; then
+  path=$(oc exec -n "$NAMESPACE" "$pod" -c inspect -- sh -c \
+    "test -f /proof/$VM/$checkpoint/${BACKUP}-datadisk.qcow2 && echo /proof/$VM/$checkpoint/${BACKUP}-datadisk.qcow2")
+fi
+if [[ -z ${path:-} ]]; then
+  path=$(oc exec -n "$NAMESPACE" "$pod" -c inspect -- sh -c \
+    "find /proof/$VM -mindepth 2 -maxdepth 2 -name '${BACKUP}-datadisk.qcow2' 2>/dev/null | sort | tail -1")
+fi
 if [[ -z $path ]]; then
   echo "ERROR: no backup artifact found on disk for $BACKUP (checked /proof/$VM in PVC $BACKUP_PVC)" >&2
   exit 1

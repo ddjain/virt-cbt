@@ -15,7 +15,7 @@ if [[ -z $SSH_PUBLIC_KEY && -n $SSH_KEY && -r $SSH_KEY.pub ]]; then SSH_PUBLIC_K
 
 usage() { cat <<'EOF'
 Usage: odf-vm-validator.sh [--config FILE] COMMAND [options]
-Commands: generate-keys check-prereqs density-setup density-status density-teardown discover-vms backup cbt-backup cbt-payload-proof cbt-evidence verify status ssh report list-reports e2e
+Commands: generate-keys check-prereqs density-setup density-status density-teardown[--all] discover-vms backup cbt-backup cbt-payload-proof cbt-evidence verify status ssh report list-reports e2e
 Selection options: --vms CSV | --count N | --selector key=value | --all
 EOF
 }
@@ -31,7 +31,36 @@ render_job() { local out=$1; sed -e "s|REPLACE_NAMESPACE|$NAMESPACE|g" -e "s|REP
 density_setup() { [[ $VM_COUNT =~ ^[1-9][0-9]*$ ]] || { echo 'ERROR: VM_COUNT must be positive'; return 2; }; local existing; existing=$(oc get namespace "$NAMESPACE" -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}' 2>/dev/null || true); if oc get namespace "$NAMESPACE" >/dev/null 2>&1; then [[ $existing == odf-cbt-validator ]] || { echo "ERROR: namespace $NAMESPACE is not utility-owned"; return 1; }; else oc create namespace "$NAMESPACE"; oc label namespace "$NAMESPACE" app.kubernetes.io/managed-by=odf-cbt-validator --overwrite; fi; if oc get vm -n "$NAMESPACE" -l "$VM_LABEL_SELECTOR" -o name | grep -q .; then echo 'ERROR: managed VM pool already exists; teardown first' >&2; return 1; fi; local job; mkdir -p "$ROOT/kube-burner/rendered"; job=$(mktemp "$ROOT/kube-burner/rendered/density.XXXX.yml"); render_job "$job"; (cd "$ROOT/kube-burner" && kube-burner init --config "rendered/$(basename "$job")" --kubeconfig "$KUBECONFIG" --log-level error); rm -f "$job"; wait_pool; }
 wait_pool() { local deadline=$((SECONDS+STABILIZE_TIMEOUT)) x; while ((SECONDS<deadline)); do local count ready; count=$(oc get vm -n "$NAMESPACE" -l "$VM_LABEL_SELECTOR" --no-headers 2>/dev/null | wc -l | tr -d ' '); ready=$(oc get vm -n "$NAMESPACE" -l "$VM_LABEL_SELECTOR" -o json | jq '[.items[]|select(.status.ready==true and .status.changedBlockTracking.state=="Enabled")]|length'); if [[ $count == "$VM_COUNT" && $ready == "$VM_COUNT" ]]; then break; fi; sleep 5; done; selected=(); while IFS= read -r x; do selected+=("$x"); done < <("$ROOT/scripts/select-vms.sh" --kubeconfig "$KUBECONFIG" --namespace "$NAMESPACE" --base-selector "$VM_LABEL_SELECTOR" --count "$VM_COUNT"); ((${#selected[@]} == VM_COUNT)) || { echo 'ERROR: VM pool did not become ready'; return 1; }; for vm in "${selected[@]}"; do oc wait --for=jsonpath='{.status.ready}'=true vm/"$vm" -n "$NAMESPACE" --timeout="${TIMEOUT}s"; oc wait --for=jsonpath='{.status.phase}'=Running vmi/"$vm" -n "$NAMESPACE" --timeout="${TIMEOUT}s"; done; }
 density_status() { if [[ ${COUNT_ONLY:-} == 1 ]]; then oc get vm -n "$NAMESPACE" -l "$VM_LABEL_SELECTOR" --no-headers | wc -l; elif [[ ${SUMMARY:-} == 1 ]]; then oc get vm -n "$NAMESPACE" -l "$VM_LABEL_SELECTOR" -o json | jq '{count:(.items|length),ready:([.items[]|select(.status.ready==true)]|length),cbtEnabled:([.items[]|select(.status.changedBlockTracking.state=="Enabled")]|length)}'; else oc get vm,vmi,pvc,virtualmachinebackuptracker -n "$NAMESPACE" -l "$VM_LABEL_SELECTOR" -o wide; fi; }
-density_teardown() { local owned; owned=$(oc get namespace "$NAMESPACE" -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}' 2>/dev/null || true); [[ $owned == odf-cbt-validator ]] || { echo "ERROR: refusing unowned namespace $NAMESPACE" >&2; return 1; }; oc delete namespace "$NAMESPACE" --wait=true; }
+density_teardown() {
+  local mode='' ns owned pending=() failed=0
+  while (($#)); do case "$1" in
+    --all) [[ -z $mode ]] || { echo 'ERROR: density-teardown accepts at most --all' >&2; return 2; }; mode=all; shift;;
+    *) echo "ERROR: unknown density-teardown option: $1" >&2; return 2;;
+  esac; done
+  if [[ $mode == all ]]; then
+    while IFS= read -r ns; do pending+=("$ns"); done < <(
+      oc get namespace -l app.kubernetes.io/managed-by=odf-cbt-validator -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null
+    )
+    if ((${#pending[@]} == 0)); then
+      echo 'No utility-owned namespaces to tear down'
+      return 0
+    fi
+    printf 'Tearing down %s utility-owned namespace(s): %s\n' "${#pending[@]}" "${pending[*]}"
+    for ns in "${pending[@]}"; do
+      owned=$(oc get namespace "$ns" -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}' 2>/dev/null || true)
+      if [[ $owned != odf-cbt-validator ]]; then
+        echo "ERROR: refusing unowned namespace $ns" >&2
+        failed=1
+        continue
+      fi
+      oc delete namespace "$ns" --wait=true || failed=1
+    done
+    return "$failed"
+  fi
+  owned=$(oc get namespace "$NAMESPACE" -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}' 2>/dev/null || true)
+  [[ $owned == odf-cbt-validator ]] || { echo "ERROR: refusing unowned namespace $NAMESPACE" >&2; return 1; }
+  oc delete namespace "$NAMESPACE" --wait=true
+}
 discover() { if (($#==0)); then set -- --all; fi; parse_selection "$@"; if [[ ${COUNT_ONLY:-} == 1 ]]; then printf '%s\n' "${#selected[@]}"; else printf '%s\n' "${selected[@]}"; fi; }
 wait_backup() {
   # Only a synchronization barrier: waits for the VirtualMachineBackup job to
@@ -43,7 +72,7 @@ wait_backup() {
   oc wait --for=jsonpath='{.status.conditions[?(@.type=="Done")].status}'=True virtualmachinebackup/"$name" -n "$NAMESPACE" --timeout="${TIMEOUT}s" 2>/dev/null || \
     oc wait --for=jsonpath='{.status.conditions[?(@.type=="Complete")].status}'=True virtualmachinebackup/"$name" -n "$NAMESPACE" --timeout="${TIMEOUT}s"
 }
-backup_one() { local vm=$1 name=$2 tracker="$vm-tracker" pvc="$vm-backup-output"; local checkpoint; checkpoint=$(oc get virtualmachinebackuptracker "$tracker" -n "$NAMESPACE" -o json | jq -r '.status.latestCheckpoint // .status.checkpointName // empty'); [[ -z $checkpoint ]] || { echo "full backup already exists for $vm; use cbt-backup or recreate density"; return 1; }; oc delete virtualmachinebackup "$name" -n "$NAMESPACE" --ignore-not-found; cat <<EOF | oc apply -f -
+backup_one() { local vm=$1 name=$2 tracker="$vm-tracker" pvc="$vm-backup-output"; local checkpoint; checkpoint=$(oc get virtualmachinebackuptracker "$tracker" -n "$NAMESPACE" -o json | jq -r '.status.latestCheckpoint // .status.checkpointName // empty'); [[ -z $checkpoint ]] || { echo "full backup already exists for $vm; use cbt-backup or recreate density"; return 1; }; oc delete virtualmachinebackup "$name" -n "$NAMESPACE" --ignore-not-found --wait=true; cat <<EOF | oc apply -f -
 apiVersion: backup.kubevirt.io/v1alpha1
 kind: VirtualMachineBackup
 metadata: {name: $name, namespace: $NAMESPACE}
@@ -54,7 +83,7 @@ spec:
   skipQuiesce: true
 EOF
 wait_backup "$vm" "$name"; cbt_backup_evidence "$vm" "$name" Full; }
-cbt_one() { local vm=$1 name=$2 tracker="$vm-tracker" pvc="$vm-backup-output"; oc get virtualmachinebackup "$vm-full" -n "$NAMESPACE" >/dev/null; local before; before=$(oc get virtualmachinebackuptracker "$tracker" -n "$NAMESPACE" -o json | jq -r '.status.latestCheckpoint // .status.checkpointName // empty'); [[ -n $before ]] || { echo "no full checkpoint for $vm"; return 1; }; oc delete virtualmachinebackup "$name" -n "$NAMESPACE" --ignore-not-found; cat <<EOF | oc apply -f -
+cbt_one() { local vm=$1 name=$2 tracker="$vm-tracker" pvc="$vm-backup-output"; oc get virtualmachinebackup "$vm-full" -n "$NAMESPACE" >/dev/null; local before; before=$(oc get virtualmachinebackuptracker "$tracker" -n "$NAMESPACE" -o json | jq -r '.status.latestCheckpoint // .status.checkpointName // empty'); [[ -n $before ]] || { echo "no full checkpoint for $vm"; return 1; }; oc delete virtualmachinebackup "$name" -n "$NAMESPACE" --ignore-not-found --wait=true; cat <<EOF | oc apply -f -
 apiVersion: backup.kubevirt.io/v1alpha1
 kind: VirtualMachineBackup
 metadata: {name: $name, namespace: $NAMESPACE}
@@ -109,7 +138,7 @@ wait_for_proof_guest_ssh() {
 }
 backup_force_full_one() {
   local vm=$1 name=$2 tracker="$1-tracker" pvc="$1-backup-output"
-  oc delete virtualmachinebackup "$name" -n "$NAMESPACE" --ignore-not-found
+  oc delete virtualmachinebackup "$name" -n "$NAMESPACE" --ignore-not-found --wait=true
   cat <<EOF | oc apply -f -
 apiVersion: backup.kubevirt.io/v1alpha1
 kind: VirtualMachineBackup
@@ -340,4 +369,4 @@ EOF
   proof_report_done=1
 }
 case "$COMMAND" in
- help) usage;; generate-keys) generate_keys;; check-prereqs) check_prereqs;; density-setup) [[ ${ARGS[0]:-} == --count ]] && VM_COUNT=${ARGS[1]}; density_setup;; density-status) density_status;; density-teardown) density_teardown;; discover-vms) discover "${ARGS[@]}";; backup|cbt-backup|verify) run_selected "$COMMAND" "${ARGS[@]}";; cbt-payload-proof) cbt_payload_proof;; cbt-evidence) cbt_evidence_selected "${ARGS[@]}";; status) status_selected "${ARGS[@]}";; ssh) ssh_guest "${ARGS[@]}";; report) report;; list-reports) list_reports;; e2e) [[ ${ARGS[0]:-} == --count ]] && VM_COUNT=${ARGS[1]}; e2e "$VM_COUNT";; *) usage >&2; exit 2;; esac
+ help) usage;; generate-keys) generate_keys;; check-prereqs) check_prereqs;; density-setup) [[ ${ARGS[0]:-} == --count ]] && VM_COUNT=${ARGS[1]}; density_setup;; density-status) density_status;; density-teardown) density_teardown "${ARGS[@]}";; discover-vms) discover "${ARGS[@]}";; backup|cbt-backup|verify) run_selected "$COMMAND" "${ARGS[@]}";; cbt-payload-proof) cbt_payload_proof;; cbt-evidence) cbt_evidence_selected "${ARGS[@]}";; status) status_selected "${ARGS[@]}";; ssh) ssh_guest "${ARGS[@]}";; report) report;; list-reports) list_reports;; e2e) [[ ${ARGS[0]:-} == --count ]] && VM_COUNT=${ARGS[1]}; e2e "$VM_COUNT";; *) usage >&2; exit 2;; esac

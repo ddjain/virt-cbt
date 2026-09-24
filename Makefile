@@ -21,7 +21,7 @@ help:
 	  '  make check-prereqs                       Validate tools, CRDs, ODF and CBT' \
 	  '  make density-setup N=2                   Create deterministic Fedora VM density' \
 	  '  make density-status [SUMMARY=1]          Show owned VM pool' \
-	  '  make density-teardown                    Delete only owned namespace' \
+	  '  make density-teardown [ALL=1]            Delete config namespace, or all utility-owned namespaces' \
 	  '  make discover-vms [N=2|ALL=1]            List selected utility VMs' \
 	  '  make backup VMS=a,b|N=2|SELECTOR=k=v|ALL=1  Full backups' \
 	  '  make cbt-backup VMS=a,b|N=2|SELECTOR=k=v|ALL=1 Incremental backups' \
@@ -53,7 +53,7 @@ density-status:
 	@SUMMARY=$(SUMMARY) COUNT_ONLY=$(COUNT_ONLY) $(SCRIPT) --config $(CONFIG) density-status
 
 density-teardown:
-	@$(SCRIPT) --config $(CONFIG) density-teardown
+	@$(SCRIPT) --config $(CONFIG) density-teardown $(if $(ALL),--all,)
 
 discover-vms:
 	@SUMMARY=$(SUMMARY) COUNT_ONLY=$(COUNT_ONLY) $(SCRIPT) --config $(CONFIG) discover-vms $(if $(VMS),--vms $(VMS),$(if $(N),--count $(N),$(if $(n),--count $(n),$(if $(SELECTOR),--selector $(SELECTOR),$(if $(ALL),--all,)))))
