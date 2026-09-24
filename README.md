@@ -229,8 +229,11 @@ it via a short-lived, read-only inspector pod mounted **only** against the
 `<vm>-backup-output` PVC (never the VM's own disk or its live CBT-overlay
 PVC — mounting either of those into a second pod while the VM is running
 was tried during development and caused a real I/O pause on the live VM; see
-§8 of CBT-EXPLAINED.md), scheduled onto a different node than the VM as
+§10 of CBT-EXPLAINED.md), scheduled onto a different node than the VM as
 defense in depth.
+
+Layers, backup-file layout, and how a Push-mode chain would be restored
+(conceptually) are in **§5** of the same doc.
 
 ## Reports
 
@@ -267,4 +270,4 @@ docs/cbt/                               CBT architecture, ops, and test runbooks
 Standard `verify` and `cbt-evidence` prove the backup artifact is physically
 the type it claims to be and contains changed-block data. They do not prove
 arbitrary point-in-time **restore** works — that's a separate, not-yet-built
-check.
+check. See [docs/cbt/CBT-EXPLAINED.md §5.5](docs/cbt/CBT-EXPLAINED.md#55-how-restore-works-conceptually).

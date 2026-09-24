@@ -111,7 +111,7 @@ to fall back to a full one.
 > in memory and only writes them back to that file on a clean close — so
 > inspecting the live file from the outside can show *no bitmaps at all*
 > even though CBT is working correctly. §7 covers a safer way to get the
-> same confidence without touching this file while the VM is up, and §9
+> same confidence without touching this file while the VM is up, and §10
 > covers a real incident that came from trying to read it live anyway.
 
 ---
@@ -219,7 +219,168 @@ that says "Completed".
 
 ---
 
-## 5. Why "trust the status field" is dangerous once you add chaos
+## 5. Putting it together: QEMU, the VM, disks, backup files, and restore
+
+This section is the end-to-end mental model — how the pieces from §2–§4
+relate when a Fedora VM is running on OpenShift Virtualization + ODF, and
+what "restore" would mean for the Push-mode artifacts. Names below match a
+typical density-validator VM (`fedora-cbt-1`); substitute your own prefix.
+
+### 5.1 Layers: QEMU ↔ VM ↔ disks
+
+```
+┌─ OpenShift worker node ──────────────────────────────────────┐
+│  virt-launcher pod  (hosts your VM)                          │
+│                                                              │
+│   ┌─ QEMU process ────────────────────────────────────────┐  │
+│   │  = the emulator that actually runs the guest            │  │
+│   │  owns disk I/O and the dirty bitmaps                    │  │
+│   │                                                          │  │
+│   │   Guest OS (Fedora)  ←── "the VM" from your POV         │  │
+│   │     writes to /data/...                                  │  │
+│   │            │                                             │  │
+│   │            ▼                                             │  │
+│   │   virtio disk "datadisk"                                 │  │
+│   └────────────┼─────────────────────────────────────────────┘  │
+│                │                                                │
+│   REAL DATA PVC              CBT OVERLAY (bitmap bookkeeping)   │
+│   <vm>-data                  persistent-state-for-<vm>-…        │
+│   …/vmi-disks/datadisk       …/libvirt/qemu/cbt/datadisk.qcow2  │
+│   (your actual bytes)        (tiny; bitmaps + checkpoints only) │
+│                                                              │
+│   BACKUP OUTPUT PVC  <vm>-backup-output                      │
+│   (separate — receives Push-mode .qcow2 copies; safe to      │
+│    mount from a short-lived inspector pod off the VM node)   │
+└──────────────────────────────────────────────────────────────┘
+```
+
+| Term | What it is |
+|---|---|
+| **VM** | KubeVirt `VirtualMachine` + running `VirtualMachineInstance` |
+| **QEMU** | Process inside `virt-launcher` that executes the guest and tracks dirty blocks |
+| **Data disk** | PVC `<vm>-data` — guest-visible volume (e.g. mounted at `/data`) |
+| **Backup PVC** | PVC `<vm>-backup-output` — where Full/Incremental qcow2 files land |
+| **CBT overlay** | Small qcow2 at `…/libvirt/qemu/cbt/<disk>.qcow2` — bitmaps only, not guest data |
+
+### 5.2 How the data disk is attached
+
+```
+VirtualMachine.spec
+  volumes: PVC <vm>-data
+  disks:   name datadisk, changedBlockTracking: true
+        │
+        ▼
+  PVC attached into virt-launcher
+        │
+        ▼
+  QEMU presents it as disk "datadisk"
+  Guest sees it as /dev/vdX → filesystem at /data
+```
+
+CBT must also be allowed by cluster config (feature gate + label selector);
+see `CBT-ARCHITECTURE.md`. When both are in place,
+`VirtualMachine.status.changedBlockTracking.state` becomes `Enabled` and
+KubeVirt creates/maintains the overlay + dirty bitmaps for that disk.
+
+### 5.3 What files a backup generates, and where they live
+
+Push-mode backups write **into the backup-output PVC**, not into the data
+disk and not into the CBT overlay:
+
+```
+PVC <vm>-backup-output
+└── <vm>/
+    ├── <vm>-full-<timestamp>/
+    │     └── <vm>-full-datadisk.qcow2
+    │           • format: qcow2
+    │           • self-contained Full (no backing-filename in the header)
+    │           • size ≈ allocated bytes of the whole disk
+    │
+    └── <vm>-incremental-<timestamp>/
+          └── <vm>-incremental-datadisk.qcow2
+                • format: qcow2
+                • CBT Incremental — header includes:
+                  backing-filename =
+                    /var/run/kubevirt-private/libvirt/qemu/cbt/datadisk.qcow2
+```
+
+The inspector pod in this repo mounts that PVC at `/proof/…`, so the same
+paths appear under `/proof/<vm>/…` in evidence JSON.
+
+While a backup runs, KubeVirt temporarily hot-plugs the backup-output PVC
+into the virt-launcher, QEMU writes the qcow2, then the PVC is unplugged
+again. After that, only the finished files remain on the backup PVC.
+
+### 5.4 CBT overlay format and bookkeeping (recap)
+
+```
+CBT overlay file  (NOT your data disk)
+  path (in launcher):  /var/run/kubevirt-private/libvirt/qemu/cbt/<disk>.qcow2
+  format:              qcow2 used as a bitmap container
+  contents:            dirty bitmaps + checkpoint names
+  backing PVC:         persistent-state-for-<vm>-<suffix>
+
+Disk blocks:   [0][1][2][3][4][5][6][7][8][9] ...
+Dirty bitmap:    0  0  0  1  0  0  0  1  1  0
+                         ▲           ▲  ▲
+                    guest wrote here since last checkpoint
+```
+
+| | Data disk PVC | CBT overlay (state PVC) | Backup-output PVC |
+|---|---|---|---|
+| Holds guest files? | Yes | No | Copies of disk ranges |
+| Holds dirty bitmaps? | No | Yes | No (header may *name* the overlay) |
+| Mount from a 2nd pod while VM runs? | **Never** | **Never** | Yes (read-only; prefer off-node) |
+
+While the VM is up, QEMU keeps bitmaps mostly in memory and flushes on a
+clean close — so inspecting the *live* overlay from outside is both
+unreliable and unsafe (§10). Prove Full-vs-Incremental from the **backup**
+qcow2 header instead (§7).
+
+### 5.5 How restore works (conceptually)
+
+This repository's `verify` / `cbt-evidence` path proves that backup
+artifacts are physically Full or Incremental. It does **not** restore them
+onto a new volume or VM. Restoring a Push-mode CBT chain looks like this:
+
+```
+Want the disk as of Incremental-2?
+
+  Full.qcow2  ←── Incremental-1.qcow2  ←── Incremental-2.qcow2
+  (base)         (delta since Full)       (delta since Inc-1)
+
+Restore outline:
+  1. Create an empty target PVC (or volume)
+  2. Apply the qcow2 chain onto it (e.g. qemu-img convert / rebase
+     of Full + the Incrementals you need)
+  3. Attach that volume to a new VM (or replace the old data PVC)
+     and boot; verify guest data independently
+```
+
+- **Full alone** restores to the Full checkpoint's point in time.
+- **Full + later Incrementals** restores to the latest checkpoint in the
+  chain you apply.
+- The **CBT overlay** (`…/cbt/datadisk.qcow2`) is bookkeeping for *taking
+  the next backup* — you do **not** restore from it.
+
+```
+RESTORE FROM THESE                          DO NOT RESTORE FROM THESE
+─────────────────────────────────────       ──────────────────────────
+<vm>-backup-output/*.qcow2                  live CBT overlay
+  (Full + Incremental artifacts)            live <vm>-data PVC
+                                            VirtualMachineBackup.status
+```
+
+KubeVirt's `VirtualMachineRestore` API restores **snapshots**, not these
+Push-mode CBT payloads. A production consumer (backup product) is expected
+to own retention, transport, encryption, and restore. Until this repo adds
+an explicit restore-to-new-VM check, do not treat a green `verify` as proof
+of recoverability — only as proof that the artifacts are the CBT type they
+claim to be (see also `CBT-TEST-GUIDE.md` § "Restore limitation").
+
+---
+
+## 6. Why "trust the status field" is dangerous once you add chaos
 
 Normally, the tracker keeps a friendly status:
 
@@ -266,7 +427,7 @@ just broke.**
 
 ---
 
-## 6. The status-independent check: read the qcow2's own header
+## 7. The status-independent check: read the qcow2's own header
 
 The resulting *backup* qcow2 (the one sitting in the backup PVC after a
 backup finishes) is just a file. `qemu-img info` decodes its header — no
@@ -276,7 +437,7 @@ to:
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  inspector pod (read-only mount of ONLY the backup PVC —      │
-│  see §9 for why "only")                                        │
+│  see §10 for why "only")                                       │
 │                                                                │
 │   $ qemu-img info --output=json --force-share my-vm-incremental-datadisk.qcow2
 │   {                                                             │
@@ -305,28 +466,28 @@ Two things worth calling out about *why* this simple check is enough:
    backing file.** It just reads the string out of the qcow2 header. That
    means this check works even if the CBT overlay/bitmap file is completely
    unreachable — which matters, because reaching it safely turns out to be
-   the hard part (§9).
+   the hard part (§10).
 2. It's tempting to *also* want a size figure for the incremental — "how
    many bytes actually changed?" — via `qemu-img map`. That works fine for
    a Full backup (self-contained, nothing to open). For an Incremental,
    `qemu-img map` needs to open the backing file to compute it accurately,
-   which reopens exactly the safety problem in §9. The pragmatic choice:
+   which reopens exactly the safety problem in §10. The pragmatic choice:
    get the size for Full backups, and simply don't measure it for
    Incrementals — you already have your correctness answer from the header
    string alone, without needing the size.
 
 ---
 
-## 7. Where this fits into chaos testing
+## 8. Where this fits into chaos testing
 
 ```
   1. create the VM(s) and their VirtualMachineBackupTracker
-  2. take a baseline Full backup (§4) → verify it's physically Full (§6)
+  2. take a baseline Full backup (§4) → verify it's physically Full (§7)
   3. ── inject chaos here ──►  kill virt-launcher / virt-handler /
                                 a storage OSD / partition the network /
                                 reboot the node
   4. take an Incremental backup (§4), during or right after the chaos
-  5. VALIDATE — read the Incremental qcow2's header (§6) at any point
+  5. VALIDATE — read the Incremental qcow2's header (§7) at any point
      afterward, independent of whether the chaos already ended:
        → PASS/FAIL decided by reading the backup qcow2's own header,
          never VirtualMachineBackup.status or controller logs
@@ -341,9 +502,9 @@ chaos, then verify what actually happened, without disturbing it further").
 
 ---
 
-## 8. Proving the mechanism works at all, from first principles
+## 9. Proving the mechanism works at all, from first principles
 
-Before trusting the header check in §6, it's worth proving to yourself, on
+Before trusting the header check in §7, it's worth proving to yourself, on
 a disposable VM, that CBT genuinely exports only changed bytes:
 
 1. Create a VM with a spare data disk (`/dev/vdb` or similar), with CBT
@@ -382,12 +543,12 @@ copying everything.
 
 ---
 
-## 9. A real incident: how *not* to read the CBT overlay, and why
+## 10. A real incident: how *not* to read the CBT overlay, and why
 
 This is worth reading even if you never build this check yourself, because
 the failure mode is non-obvious and destructive.
 
-An earlier design for the §6 check tried to gather *extra* evidence by also
+An earlier design for the §7 check tried to gather *extra* evidence by also
 mounting the VM's live CBT-overlay/state PVC into a second, separate pod (to
 inspect QEMU's dirty-bitmap list and their `in-use` flags directly — the
 idea flagged as unreliable back in §3). That PVC is backed by Ceph RBD. On
@@ -410,11 +571,11 @@ scenario; it was a real incident caused by the verification tooling itself.
               QEMU pauses the VM: "low-level IO error detected"
 ```
 
-The fix — and the reason §6's check only ever touches the backup PVC:
+The fix — and the reason §7's check only ever touches the backup PVC:
 
 - **Never mount the CBT-overlay/state PVC into a second pod at all.** It's
   genuinely still attached to the live VM; there is no safe way to read it
-  concurrently, and — per §6's second point — it isn't even necessary, since
+  concurrently, and — per §7's second point — it isn't even necessary, since
   the backing-file *name* alone is enough to prove Incremental-vs-Full
   without ever opening that file.
 - The backup PVC is safe to mount from a second pod (it isn't part of the

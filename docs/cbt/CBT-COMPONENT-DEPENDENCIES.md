@@ -69,7 +69,7 @@ virt-launcher pod
 `persistent-state-for-*` PVC into a second pod while the VM is running.
 Dual-attaching RBD on the same node has caused real `PausedIOError` on
 the live VM. Evidence checks must use **only** the backup-output PVC.
-See `CBT-EXPLAINED.md` §9 and `AGENTS.md`.
+See `CBT-EXPLAINED.md` §10 and `AGENTS.md`.
 
 ---
 
