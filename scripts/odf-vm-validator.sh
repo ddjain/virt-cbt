@@ -17,7 +17,7 @@ if [[ -z $SSH_PUBLIC_KEY && -n $SSH_KEY && -r $SSH_KEY.pub ]]; then SSH_PUBLIC_K
 
 usage() { cat <<'EOF'
 Usage: odf-vm-validator.sh [--config FILE] COMMAND [options]
-Commands: generate-keys check-prereqs density-setup density-status density-teardown[--all] discover-vms backup cbt-backup cbt-payload-proof cbt-restore-proof cbt-evidence cbt-diagnostics verify status ssh report list-reports e2e
+Commands: generate-keys check-prereqs density-setup density-status density-teardown[--all] discover-vms backup cbt-backup backup-reset cbt-cycle cbt-payload-proof cbt-restore-proof cbt-evidence cbt-diagnostics verify status ssh report list-reports e2e
 Selection options: --vms CSV | --count N | --selector key=value | --all
 EOF
 }
@@ -148,7 +148,7 @@ check_prereqs() {
   echo 'Prerequisites OK'
 }
 generate_keys() { [[ -n $SSH_KEY ]] || SSH_KEY="$ROOT/keys/cbt-validator"; mkdir -p "$(dirname "$SSH_KEY")"; if [[ ! -r $SSH_KEY ]]; then ssh-keygen -q -t ed25519 -N '' -f "$SSH_KEY"; fi; SSH_PUBLIC_KEY=$(<"$SSH_KEY.pub"); echo "SSH key: $SSH_KEY"; }
-render_job() { local out=$1; sed -e "s|REPLACE_NAMESPACE|$NAMESPACE|g" -e "s|REPLACE_REPLICAS|$VM_COUNT|g" -e "s|REPLACE_VM_PREFIX|$VM_PREFIX|g" -e "s|REPLACE_CONTAINER_IMAGE|$CONTAINER_IMAGE|g" -e "s|REPLACE_SSH_USER|$SSH_USER|g" -e "s|REPLACE_SSH_PUBLIC_KEY|$SSH_PUBLIC_KEY|g" -e "s|REPLACE_VM_CPU|$VM_CPU|g" -e "s|REPLACE_VM_MEMORY|$VM_MEMORY|g" -e "s|REPLACE_DATA_SIZE|$DATA_SIZE|g" -e "s|REPLACE_BACKUP_SIZE|$BACKUP_SIZE|g" -e "s|REPLACE_DATA_STORAGE_CLASS|$DATA_STORAGE_CLASS|g" -e "s|REPLACE_BACKUP_STORAGE_CLASS|$BACKUP_STORAGE_CLASS|g" -e "s|REPLACE_TARGET_NODE|$TARGET_NODE|g" "$ROOT/kube-burner/odf-cbt-density.yml" >"$out"; }
+render_job() { local out=$1; sed -e "s|REPLACE_NAMESPACE|$NAMESPACE|g" -e "s|REPLACE_REPLICAS|$VM_COUNT|g" -e "s|REPLACE_VM_PREFIX|$VM_PREFIX|g" -e "s|REPLACE_CONTAINER_IMAGE|$CONTAINER_IMAGE|g" -e "s|REPLACE_SSH_USER|$SSH_USER|g" -e "s|REPLACE_SSH_PUBLIC_KEY|$SSH_PUBLIC_KEY|g" -e "s|REPLACE_VM_CPU|$VM_CPU|g" -e "s|REPLACE_VM_MEMORY|$VM_MEMORY|g" -e "s|REPLACE_DATA_SIZE|$DATA_SIZE|g" -e "s|REPLACE_BACKUP_SIZE|$BACKUP_SIZE|g" -e "s|REPLACE_DATA_STORAGE_CLASS|$DATA_STORAGE_CLASS|g" -e "s|REPLACE_BACKUP_STORAGE_CLASS|$BACKUP_STORAGE_CLASS|g" -e "s|REPLACE_TARGET_NODE|$TARGET_NODE|g" -e "s|REPLACE_MARKER_BASE_MIB|$RESTORE_PROOF_BASE_MIB|g" "$ROOT/kube-burner/odf-cbt-density.yml" >"$out"; }
 density_setup() { [[ $VM_COUNT =~ ^[1-9][0-9]*$ ]] || { echo 'ERROR: VM_COUNT must be positive'; return 2; }; local existing; existing=$(oc get namespace "$NAMESPACE" -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}' 2>/dev/null || true); if oc get namespace "$NAMESPACE" >/dev/null 2>&1; then [[ $existing == odf-cbt-validator ]] || { echo "ERROR: namespace $NAMESPACE is not utility-owned"; return 1; }; else oc create namespace "$NAMESPACE"; oc label namespace "$NAMESPACE" app.kubernetes.io/managed-by=odf-cbt-validator --overwrite; fi; if oc get vm -n "$NAMESPACE" -l "$VM_LABEL_SELECTOR" -o name | grep -q .; then echo 'ERROR: managed VM pool already exists; teardown first' >&2; return 1; fi; local job; mkdir -p "$ROOT/kube-burner/rendered"; job=$(mktemp "$ROOT/kube-burner/rendered/density.XXXX.yml"); render_job "$job"; (cd "$ROOT/kube-burner" && kube-burner init --config "rendered/$(basename "$job")" --kubeconfig "$KUBECONFIG" --log-level error); rm -f "$job"; wait_pool; }
 wait_pool() {
   local deadline=$((SECONDS+STABILIZE_TIMEOUT)) count=0 ready=0 x
@@ -342,6 +342,67 @@ EOF
   ((wait_rc == 0)) || return "$wait_rc"
   cbt_backup_evidence "$vm" "$name" Incremental
 }
+backup_reset_one() {
+  # Clear Push-mode backup artifacts for one VM so a fresh Full can run again.
+  # Keeps the VM, data PVC, guest files, and live CBT overlay untouched.
+  local vm=$1
+  local tracker="$vm-tracker" pvc="$vm-backup-output"
+  assert_owned_namespace || return 1
+  log INFO RESET "Clearing backups/tracker/backup-output for $vm"
+  oc delete virtualmachinebackup "$vm-full" "$vm-incremental" -n "$NAMESPACE" \
+    --ignore-not-found --wait=true --timeout="${TIMEOUT}s"
+  oc delete virtualmachinebackuptracker "$tracker" -n "$NAMESPACE" \
+    --ignore-not-found --wait=true --timeout="${TIMEOUT}s"
+  oc delete pvc "$pvc" -n "$NAMESPACE" --ignore-not-found --wait=true --timeout="${TIMEOUT}s"
+  cat <<EOF | oc apply -f -
+apiVersion: backup.kubevirt.io/v1alpha1
+kind: VirtualMachineBackupTracker
+metadata:
+  name: $tracker
+  namespace: $NAMESPACE
+  labels:
+    app.kubernetes.io/name: odf-cbt-validator
+    app.kubernetes.io/managed-by: kube-burner
+spec:
+  source:
+    apiGroup: kubevirt.io
+    kind: VirtualMachine
+    name: $vm
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: $pvc
+  namespace: $NAMESPACE
+  labels:
+    app.kubernetes.io/name: odf-cbt-validator
+    app.kubernetes.io/managed-by: kube-burner
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests: {storage: $BACKUP_SIZE}
+  storageClassName: $BACKUP_STORAGE_CLASS
+EOF
+  oc wait --for=jsonpath='{.status.phase}'=Bound pvc/"$pvc" -n "$NAMESPACE" --timeout="${TIMEOUT}s"
+  oc get virtualmachinebackuptracker "$tracker" -n "$NAMESPACE" >/dev/null
+  log INFO RESET "Reset complete for $vm (tracker+backup-output recreated)"
+}
+backup_reset_selected() {
+  local vm i=0 total
+  parse_selection "$@"
+  start_report backup-reset
+  total=${#selected[@]}
+  for vm in "${selected[@]}"; do
+    ((i+=1))
+    log INFO TEST "[$i/$total] backup-reset $vm"
+    if backup_reset_one "$vm"; then
+      record "$vm" PASS 'Backup CRs, tracker, and backup-output PVC cleared and recreated'
+    else
+      record "$vm" FAIL 'backup-reset failed'
+    fi
+  done
+  ((failed==0 && inconclusive==0)) && finish_report 0 || finish_report 1
+}
 cbt_diagnostics_selected() {
   # Ad-hoc forensic dump against existing Full and/or Incremental VMBs.
   local vm i=0 total name
@@ -447,7 +508,11 @@ ssh_guest() {
 }
 report() { local f; f=$(find "$REPORTS_DIR" -name summary.json -print | sort | sed -n '$p'); [[ -n $f ]] && cat "$f" || { echo 'No reports'; return 1; }; }
 list_reports() { find "$REPORTS_DIR" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | sort -r; }
-e2e() { local count=${1:-$VM_COUNT}; density_setup; local sel=(--count "$count"); run_selected backup "${sel[@]}"; run_selected cbt-backup "${sel[@]}"; run_selected verify "${sel[@]}"; report; }
+e2e() {
+  local count=${1:-$VM_COUNT}
+  density_setup
+  cbt_cycle_selected --count "$count"
+}
 proof_cleanup() {
   local rc=$? cleanup_rc=0
   trap - EXIT
@@ -765,71 +830,63 @@ EOF
   proof_report_done=1
 }
 
-# Restores a Push-mode Full+Incremental qcow2 chain onto a new PVC, boots a
-# disposable restore VM from that PVC, and proves guest file content matches
-# the post-Incremental hash. Never mounts the source VM's data or CBT-overlay
-# PVC (only backup-output RO + the new restore PVC). VirtualMachineRestore is
-# not used — that API restores snapshots, not Push-mode CBT payloads.
-cbt_restore_proof() {
-  local stamp vm full_name inc_name proof_path base_mib append_mib
-  local hash1 hash2 restored_hash avoid_node image affinity converter restore_pvc restore_vm
-  local full_checkpoint inc_checkpoint full_path inc_path convert_out
+# Shared marker / Full+Incremental restore helpers (density cbt-cycle and
+# disposable cbt-restore-proof). Never mounts the source VM's data or
+# CBT-overlay PVC — only backup-output RO + a new restore PVC.
+# VirtualMachineRestore is not used (that API restores snapshots).
 
-  for t in oc virtctl kube-burner jq; do need "$t" || return; done
-  check_prereqs
-  [[ -n $SSH_KEY && -r $SSH_KEY ]] || { echo 'ERROR: SSH_KEY is required and must be readable for CBT restore proof' >&2; return 2; }
-  [[ -n $SSH_PUBLIC_KEY ]] || { echo 'ERROR: SSH_PUBLIC_KEY is required for the disposable proof / restore VMs' >&2; return 2; }
-  [[ $RESTORE_PROOF_BASE_MIB =~ ^[1-9][0-9]*$ && $RESTORE_PROOF_APPEND_MIB =~ ^[1-9][0-9]*$ ]] || {
-    echo 'ERROR: RESTORE_PROOF_BASE_MIB and RESTORE_PROOF_APPEND_MIB must be positive integers' >&2
-    return 2
-  }
-  base_mib=$RESTORE_PROOF_BASE_MIB
-  append_mib=$RESTORE_PROOF_APPEND_MIB
-  proof_path=/data/vm-validator/cbt-restore-proof.bin
+CBT_MARKER_PATH=/data/vm-validator/cbt-marker.bin
 
-  stamp=$(date -u +%y%m%d%H%M%S)
-  proof_namespace="cbt-restore-$stamp"
-  NAMESPACE=$proof_namespace
-  VM_PREFIX=cbt-restore-vm
-  VM_COUNT=1
-  if oc get namespace "$NAMESPACE" >/dev/null 2>&1; then
-    echo "ERROR: proof namespace already exists: $NAMESPACE" >&2
-    return 1
-  fi
+guest_marker_sha256() {
+  local vm=$1 path=$2 base
+  base=$(basename "$path")
+  proof_guest_command "$vm" \
+    "sudo -n sh -c 'mountpoint -q /data || mount /dev/vdc /data; test -f $path; sha256sum $path'" \
+    | awk -v b="$base" 'index($0, b) {print $1; exit}'
+}
 
-  start_report cbt-restore-proof
-  proof_report_started=1
-  proof_report_done=0
-  trap proof_cleanup EXIT
-  density_setup
-  vm=${selected[0]}
-  full_name="$vm-full"
-  inc_name="$vm-incremental"
-  restore_pvc="$vm-restore-data"
-  restore_vm="$vm-restored"
-  converter=cbt-restore-converter
-  wait_for_proof_guest_ssh "$vm"
-  wait_for_proof_guest_data "$vm"
-
-  echo "Writing baseline proof file (${base_mib} MiB) on $vm"
-  hash1=$(proof_guest_command "$vm" \
-    "sudo -n sh -c 'systemctl stop vm-validator.service >/dev/null 2>&1 || true; mountpoint -q /data || exit 1; mkdir -p /data/vm-validator; dd if=/dev/urandom of=$proof_path bs=1M count=$base_mib conv=fsync status=none; sha256sum $proof_path'" \
-    | awk '/cbt-restore-proof\.bin/{print $1; exit}')
-  [[ $hash1 =~ ^[0-9a-f]{64}$ ]] || { echo "ERROR: failed to capture hash1 from guest (got '${hash1:-empty}')" >&2; return 1; }
-  echo "hash1=$hash1"
-  backup_one "$vm" "$full_name"
-
-  echo "Appending ${append_mib} MiB to proof file on $vm"
-  hash2=$(proof_guest_command "$vm" \
-    "sudo -n sh -c 'dd if=/dev/urandom of=$proof_path bs=1M count=$append_mib oflag=append conv=notrunc,fsync status=none; sha256sum $proof_path'" \
-    | awk '/cbt-restore-proof\.bin/{print $1; exit}')
-  [[ $hash2 =~ ^[0-9a-f]{64}$ && $hash2 != "$hash1" ]] || {
-    echo "ERROR: failed to capture distinct hash2 (hash1=$hash1 hash2=${hash2:-empty})" >&2
+guest_marker_write_base() {
+  local vm=$1 path=$2 base_mib=$3
+  local base hash
+  base=$(basename "$path")
+  hash=$(proof_guest_command "$vm" \
+    "sudo -n sh -c 'mountpoint -q /data || exit 1; mkdir -p $(dirname "$path"); dd if=/dev/urandom of=$path bs=1M count=$base_mib conv=fsync status=none; sha256sum $path'" \
+    | awk -v b="$base" 'index($0, b) {print $1; exit}')
+  [[ $hash =~ ^[0-9a-f]{64}$ ]] || {
+    echo "ERROR: failed to capture baseline hash for $path (got '${hash:-empty}')" >&2
     return 1
   }
-  echo "hash2=$hash2"
-  sleep "$CBT_CHANGE_WAIT"
-  cbt_one "$vm" "$inc_name"
+  printf '%s\n' "$hash"
+}
+
+guest_marker_append() {
+  local vm=$1 path=$2 append_mib=$3
+  local base hash
+  base=$(basename "$path")
+  hash=$(proof_guest_command "$vm" \
+    "sudo -n sh -c 'mountpoint -q /data || exit 1; test -f $path; dd if=/dev/urandom of=$path bs=1M count=$append_mib oflag=append conv=notrunc,fsync status=none; sha256sum $path'" \
+    | awk -v b="$base" 'index($0, b) {print $1; exit}')
+  [[ $hash =~ ^[0-9a-f]{64}$ ]] || {
+    echo "ERROR: failed to capture append hash for $path (got '${hash:-empty}')" >&2
+    return 1
+  }
+  printf '%s\n' "$hash"
+}
+
+cleanup_restore_resources() {
+  local vm=$1
+  local restore_vm="$vm-restored" restore_pvc="$vm-restore-data" converter="$vm-restore-converter"
+  oc delete vm "$restore_vm" -n "$NAMESPACE" --ignore-not-found --wait=true --timeout="${TIMEOUT}s" >/dev/null || true
+  oc delete secret "$restore_vm-userdata" -n "$NAMESPACE" --ignore-not-found --wait=true --timeout="${TIMEOUT}s" >/dev/null || true
+  oc delete pod "$converter" -n "$NAMESPACE" --ignore-not-found --wait=true --timeout="${TIMEOUT}s" >/dev/null || true
+  oc delete pvc "$restore_pvc" -n "$NAMESPACE" --ignore-not-found --wait=true --timeout="${TIMEOUT}s" >/dev/null || true
+}
+
+# Convert Full+Incremental qcow2 chain onto $vm-restore-data (rebase Inc onto Full).
+convert_backup_chain_to_pvc() {
+  local vm=$1 full_name=$2 inc_name=$3
+  local restore_pvc="$vm-restore-data" converter="$vm-restore-converter"
+  local avoid_node image affinity full_checkpoint inc_checkpoint full_path inc_path convert_out
 
   avoid_node=$(oc get vmi "$vm" -n "$NAMESPACE" -o jsonpath='{.status.nodeName}' 2>/dev/null || true)
   affinity=''
@@ -843,7 +900,7 @@ cbt_restore_proof() {
   fi
   image=$(virt_launcher_image "$vm") || return 1
 
-  echo "Creating restore PVC $restore_pvc"
+  echo "Creating restore PVC $restore_pvc" >&2
   cat <<EOF | oc apply -f -
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -866,7 +923,7 @@ EOF
   full_path="/proof/$vm/$full_checkpoint/$full_name-datadisk.qcow2"
   inc_path="/proof/$vm/$inc_checkpoint/$inc_name-datadisk.qcow2"
 
-  echo "Converting Full+Incremental chain onto $restore_pvc (rebase Incremental onto Full, then qemu-img convert)"
+  echo "Converting Full+Incremental chain onto $restore_pvc (rebase Incremental onto Full, then qemu-img convert)" >&2
   oc delete pod "$converter" -n "$NAMESPACE" --ignore-not-found --wait=true --timeout="${TIMEOUT}s" >/dev/null
   cat <<EOF | oc apply -f -
 apiVersion: v1
@@ -929,8 +986,13 @@ EOF
     return 1
   }
   oc delete pod "$converter" -n "$NAMESPACE" --wait=true --timeout="${TIMEOUT}s" >/dev/null
+}
 
-  echo "Booting restore VM $restore_vm from converted PVC"
+boot_restore_vm() {
+  local vm=$1
+  local restore_vm="$vm-restored" restore_pvc="$vm-restore-data"
+
+  echo "Booting restore VM $restore_vm from converted PVC" >&2
   cat <<EOF | oc apply -f -
 apiVersion: v1
 kind: Secret
@@ -986,32 +1048,191 @@ EOF
   oc wait --for=jsonpath='{.status.ready}'=true vm/"$restore_vm" -n "$NAMESPACE" --timeout="${TIMEOUT}s"
   oc wait --for=jsonpath='{.status.phase}'=Running vmi/"$restore_vm" -n "$NAMESPACE" --timeout="${TIMEOUT}s"
   wait_for_proof_guest_ssh "$restore_vm"
+}
 
-  restored_hash=$(proof_guest_command "$restore_vm" \
-    "sudo -n sh -c 'mountpoint -q /data || mount /dev/vdc /data; test -f $proof_path; sha256sum $proof_path'" \
-    | awk '/cbt-restore-proof\.bin/{print $1; exit}')
-  [[ $restored_hash =~ ^[0-9a-f]{64}$ ]] || {
-    echo "ERROR: failed to hash restored proof file (got '${restored_hash:-empty}')" >&2
+# Restore Full+Incremental onto a new VM and require restored marker hash == expected_hash.
+# Cleans restore-only resources afterward (source VM kept). Prints restored hash on stdout.
+restore_chain_and_verify_hash() {
+  local vm=$1 marker_path=$2 expected_hash=$3
+  local restore_vm="$vm-restored" restored_hash
+  cleanup_restore_resources "$vm"
+  convert_backup_chain_to_pvc "$vm" "$vm-full" "$vm-incremental" || return 1
+  boot_restore_vm "$vm" || {
+    cleanup_restore_resources "$vm"
     return 1
   }
-  echo "restored_hash=$restored_hash"
+  restored_hash=$(guest_marker_sha256 "$restore_vm" "$marker_path") || {
+    cleanup_restore_resources "$vm"
+    return 1
+  }
+  [[ $restored_hash =~ ^[0-9a-f]{64}$ ]] || {
+    echo "ERROR: failed to hash restored marker (got '${restored_hash:-empty}')" >&2
+    cleanup_restore_resources "$vm"
+    return 1
+  }
+  echo "restored_hash=$restored_hash" >&2
+  if [[ $restored_hash != "$expected_hash" ]]; then
+    echo "ERROR: restored hash $restored_hash != expected $expected_hash" >&2
+    cleanup_restore_resources "$vm"
+    return 1
+  fi
+  cleanup_restore_resources "$vm"
+  printf '%s\n' "$restored_hash"
+}
 
+cbt_cycle_one() {
+  # Density-pool CBT cycle: rewrite marker → Full → append → Incremental →
+  # verify (guest+qcow2) → restore-hash. Does not auto-reset prior backups.
+  local vm=$1
+  local marker=$CBT_MARKER_PATH
+  local base_mib=$RESTORE_PROOF_BASE_MIB append_mib=$RESTORE_PROOF_APPEND_MIB
+  local hash0 hash1 restored_hash checkpoint full_name="$vm-full" inc_name="$vm-incremental"
+  local full_checkpoint inc_checkpoint
+
+  assert_owned_namespace || return 1
+  [[ -n $SSH_KEY && -r $SSH_KEY ]] || { echo 'ERROR: SSH_KEY is required for cbt-cycle' >&2; return 2; }
+  [[ -n $SSH_PUBLIC_KEY ]] || { echo 'ERROR: SSH_PUBLIC_KEY is required for restore VM' >&2; return 2; }
+  [[ $base_mib =~ ^[1-9][0-9]*$ && $append_mib =~ ^[1-9][0-9]*$ ]] || {
+    echo 'ERROR: RESTORE_PROOF_BASE_MIB and RESTORE_PROOF_APPEND_MIB must be positive integers' >&2
+    return 2
+  }
+
+  if oc get virtualmachinebackup "$full_name" -n "$NAMESPACE" >/dev/null 2>&1; then
+    echo "ERROR: $full_name already exists; run 'make backup-reset' first" >&2
+    return 1
+  fi
+  checkpoint=$(oc get virtualmachinebackuptracker "$vm-tracker" -n "$NAMESPACE" -o json 2>/dev/null |
+    jq -r '.status.latestCheckpoint // .status.checkpointName // empty' 2>/dev/null || true)
+  if [[ -n $checkpoint ]]; then
+    echo "ERROR: tracker $vm-tracker already has checkpoint '$checkpoint'; run 'make backup-reset' first" >&2
+    return 1
+  fi
+
+  wait_for_proof_guest_ssh "$vm"
+  wait_for_proof_guest_data "$vm"
+
+  echo "Rewriting marker baseline (${base_mib} MiB) on $vm → $marker"
+  hash0=$(guest_marker_write_base "$vm" "$marker" "$base_mib") || return 1
+  echo "hash0=$hash0"
+  backup_one "$vm" "$full_name" || return $?
+
+  echo "Appending ${append_mib} MiB to marker on $vm"
+  hash1=$(guest_marker_append "$vm" "$marker" "$append_mib") || return 1
+  [[ $hash1 != "$hash0" ]] || {
+    echo "ERROR: append hash matched baseline (hash0=$hash0)" >&2
+    return 1
+  }
+  echo "hash1=$hash1"
+  sleep "$CBT_CHANGE_WAIT"
+  cbt_one "$vm" "$inc_name" || return $?
+
+  verify_one "$vm" || return $?
+
+  restored_hash=$(restore_chain_and_verify_hash "$vm" "$marker" "$hash1") || return 1
+
+  full_checkpoint=$(oc get virtualmachinebackup "$full_name" -n "$NAMESPACE" -o json | jq -r '.status.checkpointName // empty')
+  inc_checkpoint=$(oc get virtualmachinebackup "$inc_name" -n "$NAMESPACE" -o json | jq -r '.status.checkpointName // empty')
   mkdir -p "$run_dir/evidence"
-  jq -n --arg vm "$vm" --arg restoreVm "$restore_vm" --arg proofPath "$proof_path" \
-    --arg hash1 "$hash1" --arg hash2 "$hash2" --arg restoredHash "$restored_hash" \
+  jq -n --arg vm "$vm" --arg markerPath "$marker" \
+    --arg hash0 "$hash0" --arg hash1 "$hash1" --arg restoredHash "$restored_hash" \
     --arg fullCheckpoint "$full_checkpoint" --arg incrementalCheckpoint "$inc_checkpoint" \
     --argjson baseMib "$base_mib" --argjson appendMib "$append_mib" \
-    --argjson match "$([[ $restored_hash == "$hash2" ]] && echo true || echo false)" \
-    '{vm:$vm,restoreVm:$restoreVm,status:(if $match then "PASS" else "FAIL" end),proofPath:$proofPath,baseMib:$baseMib,appendMib:$appendMib,hash1:$hash1,hash2:$hash2,restoredHash:$restoredHash,fullCheckpoint:$fullCheckpoint,incrementalCheckpoint:$incrementalCheckpoint,match:$match,message:(if $match then "Restored Full+Incremental chain reproduces post-Incremental guest file hash" else "Restored hash does not match hash2" end)}' \
-    | tee "$run_dir/evidence/$vm-restore-proof.json" >"$run_dir/per-vm/$vm.json"
+    '{vm:$vm,status:"PASS",markerPath:$markerPath,baseMib:$baseMib,appendMib:$appendMib,hash0:$hash0,hash1:$hash1,restoredHash:$restoredHash,fullCheckpoint:$fullCheckpoint,incrementalCheckpoint:$incrementalCheckpoint,match:true,message:"Full+Incremental cycle: qcow2 evidence, guest workload, and restored marker hash all passed"}' \
+    >"$run_dir/evidence/$vm-cbt-cycle.json"
+  echo "CBT cycle PASS for $vm: restored hash matches hash1 ($hash1)"
+  return 0
+}
 
-  if [[ $restored_hash != "$hash2" ]]; then
-    echo "ERROR: restored hash $restored_hash != hash2 $hash2 (hash1 was $hash1)" >&2
+cbt_cycle_selected() {
+  local vm i=0 total rc
+  parse_selection "$@"
+  start_report cbt-cycle
+  total=${#selected[@]}
+  for vm in "${selected[@]}"; do
+    ((i+=1))
+    log INFO TEST "[$i/$total] cbt-cycle $vm"
+    rc=0
+    cbt_cycle_one "$vm" || rc=$?
+    if ((rc == 0)); then
+      record "$vm" PASS 'Marker Full→append→Incremental→verify→restore-hash passed'
+    elif ((rc == 2)); then
+      record "$vm" INCONCLUSIVE 'CBT cycle incomplete: evidence could not be inspected'
+    else
+      record "$vm" FAIL 'CBT cycle failed'
+    fi
+  done
+  ((failed==0 && inconclusive==0)) && finish_report 0 || finish_report 1
+}
+
+# Disposable-namespace restore proof (keeps prior make cbt-restore-proof surface).
+cbt_restore_proof() {
+  local stamp vm full_name inc_name proof_path base_mib append_mib
+  local hash1 hash2 restored_hash full_checkpoint inc_checkpoint
+
+  for t in oc virtctl kube-burner jq; do need "$t" || return; done
+  check_prereqs
+  [[ -n $SSH_KEY && -r $SSH_KEY ]] || { echo 'ERROR: SSH_KEY is required and must be readable for CBT restore proof' >&2; return 2; }
+  [[ -n $SSH_PUBLIC_KEY ]] || { echo 'ERROR: SSH_PUBLIC_KEY is required for the disposable proof / restore VMs' >&2; return 2; }
+  [[ $RESTORE_PROOF_BASE_MIB =~ ^[1-9][0-9]*$ && $RESTORE_PROOF_APPEND_MIB =~ ^[1-9][0-9]*$ ]] || {
+    echo 'ERROR: RESTORE_PROOF_BASE_MIB and RESTORE_PROOF_APPEND_MIB must be positive integers' >&2
+    return 2
+  }
+  base_mib=$RESTORE_PROOF_BASE_MIB
+  append_mib=$RESTORE_PROOF_APPEND_MIB
+  proof_path=/data/vm-validator/cbt-restore-proof.bin
+
+  stamp=$(date -u +%y%m%d%H%M%S)
+  proof_namespace="cbt-restore-$stamp"
+  NAMESPACE=$proof_namespace
+  VM_PREFIX=cbt-restore-vm
+  VM_COUNT=1
+  if oc get namespace "$NAMESPACE" >/dev/null 2>&1; then
+    echo "ERROR: proof namespace already exists: $NAMESPACE" >&2
+    return 1
+  fi
+
+  start_report cbt-restore-proof
+  proof_report_started=1
+  proof_report_done=0
+  trap proof_cleanup EXIT
+  density_setup
+  vm=${selected[0]}
+  full_name="$vm-full"
+  inc_name="$vm-incremental"
+  wait_for_proof_guest_ssh "$vm"
+  wait_for_proof_guest_data "$vm"
+
+  echo "Writing baseline proof file (${base_mib} MiB) on $vm"
+  hash1=$(guest_marker_write_base "$vm" "$proof_path" "$base_mib") || return 1
+  echo "hash1=$hash1"
+  backup_one "$vm" "$full_name"
+
+  echo "Appending ${append_mib} MiB to proof file on $vm"
+  hash2=$(guest_marker_append "$vm" "$proof_path" "$append_mib") || return 1
+  [[ $hash2 != "$hash1" ]] || {
+    echo "ERROR: failed to capture distinct hash2 (hash1=$hash1 hash2=$hash2)" >&2
+    return 1
+  }
+  echo "hash2=$hash2"
+  sleep "$CBT_CHANGE_WAIT"
+  cbt_one "$vm" "$inc_name"
+
+  restored_hash=$(restore_chain_and_verify_hash "$vm" "$proof_path" "$hash2") || {
     ((failed+=1))
     finish_report 1
     proof_report_done=1
     return 1
-  fi
+  }
+
+  full_checkpoint=$(oc get virtualmachinebackup "$full_name" -n "$NAMESPACE" -o json | jq -r '.status.checkpointName // empty')
+  inc_checkpoint=$(oc get virtualmachinebackup "$inc_name" -n "$NAMESPACE" -o json | jq -r '.status.checkpointName // empty')
+  mkdir -p "$run_dir/evidence"
+  jq -n --arg vm "$vm" --arg restoreVm "$vm-restored" --arg proofPath "$proof_path" \
+    --arg hash1 "$hash1" --arg hash2 "$hash2" --arg restoredHash "$restored_hash" \
+    --arg fullCheckpoint "$full_checkpoint" --arg incrementalCheckpoint "$inc_checkpoint" \
+    --argjson baseMib "$base_mib" --argjson appendMib "$append_mib" \
+    '{vm:$vm,restoreVm:$restoreVm,status:"PASS",proofPath:$proofPath,baseMib:$baseMib,appendMib:$appendMib,hash1:$hash1,hash2:$hash2,restoredHash:$restoredHash,fullCheckpoint:$fullCheckpoint,incrementalCheckpoint:$incrementalCheckpoint,match:true,message:"Restored Full+Incremental chain reproduces post-Incremental guest file hash"}' \
+    | tee "$run_dir/evidence/$vm-restore-proof.json" >"$run_dir/per-vm/$vm.json"
 
   ((passed+=1))
   echo "CBT restore proof PASS: restored hash matches hash2 ($hash2); hash1=$hash1"
@@ -1019,4 +1240,4 @@ EOF
   proof_report_done=1
 }
 case "$COMMAND" in
- help) usage;; generate-keys) generate_keys;; check-prereqs) check_prereqs;; density-setup) [[ ${ARGS[0]:-} == --count ]] && VM_COUNT=${ARGS[1]}; density_setup;; density-status) density_status;; density-teardown) density_teardown "${ARGS[@]}";; discover-vms) discover "${ARGS[@]}";; backup|cbt-backup|verify) run_selected "$COMMAND" "${ARGS[@]}";; cbt-payload-proof) cbt_payload_proof;; cbt-restore-proof) cbt_restore_proof;; cbt-evidence) cbt_evidence_selected "${ARGS[@]}";; cbt-diagnostics) cbt_diagnostics_selected "${ARGS[@]}";; status) status_selected "${ARGS[@]}";; ssh) ssh_guest "${ARGS[@]}";; report) report;; list-reports) list_reports;; e2e) [[ ${ARGS[0]:-} == --count ]] && VM_COUNT=${ARGS[1]}; e2e "$VM_COUNT";; *) usage >&2; exit 2;; esac
+ help) usage;; generate-keys) generate_keys;; check-prereqs) check_prereqs;; density-setup) [[ ${ARGS[0]:-} == --count ]] && VM_COUNT=${ARGS[1]}; density_setup;; density-status) density_status;; density-teardown) density_teardown "${ARGS[@]}";; discover-vms) discover "${ARGS[@]}";; backup|cbt-backup|verify) run_selected "$COMMAND" "${ARGS[@]}";; backup-reset) backup_reset_selected "${ARGS[@]}";; cbt-cycle) cbt_cycle_selected "${ARGS[@]}";; cbt-payload-proof) cbt_payload_proof;; cbt-restore-proof) cbt_restore_proof;; cbt-evidence) cbt_evidence_selected "${ARGS[@]}";; cbt-diagnostics) cbt_diagnostics_selected "${ARGS[@]}";; status) status_selected "${ARGS[@]}";; ssh) ssh_guest "${ARGS[@]}";; report) report;; list-reports) list_reports;; e2e) [[ ${ARGS[0]:-} == --count ]] && VM_COUNT=${ARGS[1]}; e2e "$VM_COUNT";; *) usage >&2; exit 2;; esac

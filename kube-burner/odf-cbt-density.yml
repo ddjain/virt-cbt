@@ -20,6 +20,7 @@ jobs:
           prefix: REPLACE_VM_PREFIX
           user: REPLACE_SSH_USER
           sshPublicKey: REPLACE_SSH_PUBLIC_KEY
+          markerBaseMib: REPLACE_MARKER_BASE_MIB
       - objectTemplate: templates/fedora-cbt-vm-object.yml
         replicas: REPLACE_REPLICAS
         inputVars:
