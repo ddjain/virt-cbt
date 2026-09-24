@@ -1,6 +1,9 @@
 # Local cluster inventories, kubeconfigs, and test artifacts
 cloud29/
+# Local configs only — keep config.example.env tracked as the template
 config.env
+config.*.env
+!config.example.env
 keys/
 reports/
 kube-burner/rendered/
