@@ -10,7 +10,7 @@ $(error specify only one of N or n)
 endif
 endif
 
-.PHONY: help init-config generate-keys check-prereqs density-setup density-status density-teardown discover-vms backup cbt-backup cbt-payload-proof cbt-restore-proof cbt-evidence cbt-diagnostics verify status ssh report list-reports e2e
+.PHONY: help init-config generate-keys check-prereqs density-setup density-status density-teardown discover-vms backup cbt-backup backup-reset cbt-cycle cbt-payload-proof cbt-restore-proof cbt-evidence cbt-diagnostics verify status ssh report list-reports e2e
 
 help:
 	@printf '%s\n' \
@@ -25,14 +25,16 @@ help:
 	  '  make discover-vms [N=2|ALL=1]            List selected utility VMs' \
 	  '  make backup VMS=a,b|N=2|SELECTOR=k=v|ALL=1  Full backups' \
 	  '  make cbt-backup VMS=a,b|N=2|SELECTOR=k=v|ALL=1 Incremental backups' \
+	  '  make backup-reset VMS=a,b|N=2|SELECTOR=k=v|ALL=1  Clear backups/tracker/backup-output (keep VMs)' \
+	  '  make cbt-cycle VMS=a,b|N=2|SELECTOR=k=v|ALL=1  Marker→Full→append→Inc→verify→restore-hash' \
 	  '  make verify VMS=a,b|N=2|SELECTOR=k=v|ALL=1     Validate guests and backups' \
 	  '  make status [selection]                   Join VM, tracker and backup state' \
 	  '  make ssh VM=fedora-cbt-1 CMD="..."       Run a guest command' \
 	  '  make report                              Print newest JSON report' \
 	  '  make list-reports                        List reports newest first' \
-	  '  make e2e N=2                             Setup, full, CBT and verify' \
+	  '  make e2e N=2                             density-setup + cbt-cycle (no teardown)' \
 	  '  make cbt-payload-proof                  Prove CBT using incremental QCOW2 contents' \
-	  '  make cbt-restore-proof                  Write+hash, Full, append+hash, Incremental, restore chain, rehash' \
+	  '  make cbt-restore-proof                  Disposable NS: write+hash, Full, append+hash, Incremental, restore, rehash' \
 	  '  make cbt-evidence VMS=a,b|N=2|SELECTOR=k=v|ALL=1  Chaos-safe check: verify existing Full/CBT backups from qcow2 backing-file metadata, not .status' \
 	  '  make cbt-diagnostics VMS=a,b|N=2|SELECTOR=k=v|ALL=1  Forensic dump: CR YAML + controller/handler/launcher logs for existing Full/Incremental backups' \
 	  '' \
@@ -65,6 +67,12 @@ backup:
 
 cbt-backup:
 	@$(SCRIPT) --config $(CONFIG) cbt-backup $(if $(VMS),--vms $(VMS),$(if $(N),--count $(N),$(if $(n),--count $(n),$(if $(SELECTOR),--selector $(SELECTOR),$(if $(ALL),--all,)))))
+
+backup-reset:
+	@$(SCRIPT) --config $(CONFIG) backup-reset $(if $(VMS),--vms $(VMS),$(if $(N),--count $(N),$(if $(n),--count $(n),$(if $(SELECTOR),--selector $(SELECTOR),$(if $(ALL),--all,)))))
+
+cbt-cycle:
+	@$(SCRIPT) --config $(CONFIG) cbt-cycle $(if $(VMS),--vms $(VMS),$(if $(N),--count $(N),$(if $(n),--count $(n),$(if $(SELECTOR),--selector $(SELECTOR),$(if $(ALL),--all,)))))
 
 verify:
 	@$(SCRIPT) --config $(CONFIG) verify $(if $(VMS),--vms $(VMS),$(if $(N),--count $(N),$(if $(n),--count $(n),$(if $(SELECTOR),--selector $(SELECTOR),$(if $(ALL),--all,)))))

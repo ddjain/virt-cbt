@@ -18,19 +18,20 @@ The default namespace is `cbt-demo`; for shared clusters use a unique namespace.
 make check-prereqs
 make density-setup N=2
 make density-status
-make backup N=2
-sleep 5
-make cbt-backup N=2
-make verify N=2
+make cbt-cycle N=2
 make status ALL=1
 make report
+# Re-run without tearing down VMs:
+# make backup-reset N=2 && make cbt-cycle N=2
 make density-teardown          # config NAMESPACE only
 # make density-teardown ALL=1 CONFIRM=1  # every utility-owned namespace
 ```
 
 `N=2` and `n=2` select the first two utility-owned VM names in lexical order (1-indexed: `fedora-cbt-1`, `fedora-cbt-2`). The same selector must be used for Full, Incremental, and verify operations so they use the same trackers. Use `VMS=fedora-cbt-1,fedora-cbt-2` for an exact selection, `SELECTOR=some-label=value` for a label subset, or `ALL=1` for every managed VM. Selection is mandatory for backup and verification. Duplicate, missing, unowned, zero, or over-sized selections fail.
 
-`e2e N=2` performs setup, Full, Incremental, and verification while leaving evidence in place. Each VM uses `${vm}-backup-output` and `${vm}-tracker`. Backups run serially (the backup-output PVC is RWO; concurrent evidence inspectors would collide). Reports are written below `REPORTS_DIR` with `summary.json`, `summary.txt`, `run.log`, and per-VM results (`PASS` / `FAIL` / `INCONCLUSIVE`).
+`e2e N=2` performs `density-setup` then `cbt-cycle` for the first N VMs (marker rewrite → Full → append → Incremental → guest+qcow2 verify → restore-hash) while leaving the pool in place. Each VM uses `${vm}-backup-output` and `${vm}-tracker`. Backups and restore conversion run serially (the backup-output PVC is RWO). Reports are written below `REPORTS_DIR` with `summary.json`, `summary.txt`, `run.log`, and per-VM results (`PASS` / `FAIL` / `INCONCLUSIVE`).
+
+`make backup-reset` clears Full/Incremental CRs and recreates the tracker plus backup-output PVC so another Full/`cbt-cycle` can run without `density-teardown`. It does not touch the VM or guest data.
 
 ## Control-plane checklist (triage only)
 
@@ -80,6 +81,11 @@ attempted (success or failure). Defaults are large enough for mid-backup
 chaos injection (`RESTORE_PROOF_BASE_MIB=512`, `RESTORE_PROOF_APPEND_MIB=128`
 in `config.example.env`); override in `config.env` if needed.
 
+For the same restore-hash proof against an existing density pool (without a
+disposable namespace), use `make cbt-cycle` (marker path
+`/data/vm-validator/cbt-marker.bin`). Re-run with `make backup-reset` then
+`make cbt-cycle`.
+
 This is the recoverability check. It does not use `VirtualMachineRestore`
 (that API is for snapshots). It never mounts the source VM's data or
 CBT-overlay PVC.
@@ -90,7 +96,7 @@ The service refuses to run unless `/data` is mounted. It writes `/data/vm-valida
 
 ## Restore limitation and release differences
 
-The Push-mode backup API is release-dependent. The utility treats `Done`, `Complete`, or `Failed` as terminal conditions for waiting; Full-vs-Incremental correctness still comes only from qcow2 evidence. Standard `verify` / `cbt-evidence` do not restore a backup. Use `make cbt-restore-proof` for restore-to-new-VM + guest hash comparison.
+The Push-mode backup API is release-dependent. The utility treats `Done`, `Complete`, or `Failed` as terminal conditions for waiting; Full-vs-Incremental correctness still comes only from qcow2 evidence. Standard `verify` / `cbt-evidence` do not restore a backup. Use `make cbt-cycle` (density pool) or `make cbt-restore-proof` (disposable) for restore-to-new-VM + guest hash comparison.
 
 When evidence cannot be inspected (missing checkpoint path, inspector pod not Ready, qemu-img failure), results are recorded as `INCONCLUSIVE` rather than FAIL.
 

@@ -87,9 +87,11 @@ VM pool already exists in it (run `make density-teardown` first). Renders
 `kube-burner init`, which creates `N` `VirtualMachine`s named
 `<VM_PREFIX>-1` .. `<VM_PREFIX>-N` (default prefix `fedora-cbt`), each with
 its own `<vm>-data` PVC, `<vm>-backup-output` PVC, and CBT enabled on the
-data disk. Then polls until all VMs report `status.ready=true` and
-`status.changedBlockTracking.state=Enabled` (up to `STABILIZE_TIMEOUT`
-seconds).
+data disk. Cloud-init mounts `/data`, starts the SQLite workload and fio
+stress services, and seeds `/data/vm-validator/cbt-marker.bin`
+(`RESTORE_PROOF_BASE_MIB`). Then polls until all VMs report
+`status.ready=true` and `status.changedBlockTracking.state=Enabled` (up to
+`STABILIZE_TIMEOUT` seconds).
 
 ```bash
 make density-status              # table of VM/VMI/PVC/tracker state
@@ -199,9 +201,20 @@ Refuses any namespace that lacks the ownership label.
 ### All-in-one
 
 ```bash
-make e2e N=2   # density-setup → backup → cbt-backup → verify → report,
+make e2e N=2   # density-setup → cbt-cycle (marker→Full→append→Inc→verify→restore-hash)
                # for the first N VMs, no teardown
 ```
+
+### Repeat a cycle on an existing pool
+
+```bash
+make backup-reset N=2   # delete Full/Incremental CRs, recreate tracker + backup-output PVC
+make cbt-cycle N=2      # rewrite marker, Full, append, Incremental, verify, restore-hash
+```
+
+`backup-reset` keeps VMs and guest data; it only clears backup artifacts so a
+fresh Full can run. `cbt-cycle` refuses if a Full backup or tracker checkpoint
+already exists (run `backup-reset` first — it does not auto-reset).
 
 ## Other commands
 
@@ -216,6 +229,16 @@ make e2e N=2   # density-setup → backup → cbt-backup → verify → report,
   environment so spaces survive Make word-splitting.
 - **`make status [selection]`** — one table joining VM readiness, CBT state,
   and each VM's Full/Incremental/checkpoint status (defaults to `--all`).
+- **`make backup-reset [selection]`** — deletes `<vm>-full` /
+  `<vm>-incremental`, then recreates an empty `<vm>-tracker` and
+  `<vm>-backup-output` PVC. Does not touch the VM, data PVC, or guest files.
+  Required before re-running Full / `cbt-cycle` on the same pool.
+- **`make cbt-cycle [selection]`** — density-pool CBT cycle: rewrite
+  `/data/vm-validator/cbt-marker.bin` (hash0) → Full → append (hash1) →
+  Incremental → live verify (SQLite + qcow2 evidence) → restore Full+Inc
+  chain onto a temporary restore VM and require `restored_hash == hash1`.
+  Cleans restore-only resources afterward; leaves source VMs running. Sizes
+  use `RESTORE_PROOF_BASE_MIB` / `RESTORE_PROOF_APPEND_MIB`.
 - **`make cbt-diagnostics [selection]`** — ad-hoc forensic dump for existing
   `<vm>-full` / `<vm>-incremental` backups (CR YAML + controller/handler/launcher
   logs). Same bundle shape as the automatic dump written during
@@ -228,18 +251,14 @@ make e2e N=2   # density-setup → backup → cbt-backup → verify → report,
   range, takes an Incremental *and* a forced-Full "control" backup, then
   **stops the VM** (waits until the VMI is gone) before mounting state/data
   PVCs into an inspector for `qemu-img map`. Always deletes its disposable
-  namespace afterward (success or failure). Prefer `cbt-restore-proof` +
-  `cbt-evidence` when you need online-safe checks that never touch live
-  CBT/data PVCs.
-- **`make cbt-restore-proof`** — proves Push-mode Full+Incremental
-  **restoreability** with guest file hashes. Creates disposable namespace
+  namespace afterward (success or failure). Prefer `cbt-cycle` /
+  `cbt-restore-proof` + `cbt-evidence` when you need online-safe checks that
+  never touch live CBT/data PVCs.
+- **`make cbt-restore-proof`** — disposable-namespace restoreability proof
+  (same marker/convert/hash helpers as `cbt-cycle`). Creates
   `cbt-restore-<timestamp>`, writes `/data/vm-validator/cbt-restore-proof.bin`
-  (hash1) → Full backup → appends more bytes (hash2) → Incremental backup →
-  rebases the Incremental qcow2 onto the Full artifact (so convert never
-  needs the live CBT overlay) → `qemu-img convert` onto a new PVC → boots a
-  restore VM from that PVC → rehashes the file and requires
-  `restored_hash == hash2`. Never mounts the source VM's data or CBT-overlay
-  PVC. Always tears down its namespace afterward.
+  (hash1) → Full → append (hash2) → Incremental → restore chain → require
+  `restored_hash == hash2`. Always tears down its namespace afterward.
 
 ## How correctness is verified
 
@@ -307,7 +326,7 @@ docs/cbt/                               CBT architecture, ops, and test runbooks
 
 Standard `verify` and `cbt-evidence` prove the backup artifact is physically
 the type it claims to be and contains changed-block data. They do not prove
-arbitrary point-in-time **restore** works — use
-`make cbt-restore-proof` for that (guest file hash after Full+Incremental
-chain restore onto a new VM). See
+arbitrary point-in-time **restore** works — use `make cbt-cycle` (density
+pool) or `make cbt-restore-proof` (disposable namespace) for guest file hash
+after Full+Incremental chain restore onto a new VM. See
 [docs/cbt/CBT-EXPLAINED.md §5.5](docs/cbt/CBT-EXPLAINED.md#55-how-restore-works-conceptually).

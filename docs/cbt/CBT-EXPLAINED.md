@@ -376,12 +376,16 @@ KubeVirt's `VirtualMachineRestore` API restores **snapshots**, not these
 Push-mode CBT payloads. A production consumer (backup product) is expected
 to own retention, transport, encryption, and restore.
 
-This repo implements that outline as **`make cbt-restore-proof`**: write a
-known file and record `hash1` → Full backup → append and record `hash2` →
+This repo implements that outline as **`make cbt-cycle`** (density pool) and
+**`make cbt-restore-proof`** (disposable namespace): write a known file and
+record a baseline hash → Full backup → append and record a post-change hash →
 Incremental backup → convert Full+Incremental onto a new PVC (never
-mounting the source data/CBT PVCs) → boot a disposable restore VM → require
-`sha256(restored file) == hash2`. A green `verify` alone is still only proof
-of artifact *type*, not recoverability.
+mounting the source data/CBT PVCs) → boot a temporary restore VM → require
+the restored file hash to match the post-change hash. Density setup also
+seeds `/data/vm-validator/cbt-marker.bin` via cloud-init; `cbt-cycle`
+rewrites it each run. Re-run on the same pool with `make backup-reset` then
+`make cbt-cycle`. A green `verify` alone is still only proof of artifact
+*type*, not recoverability.
 
 ---
 
@@ -591,10 +595,11 @@ The fix — and the reason §7's check only ever touches the backup PVC:
   running.** It's genuinely still attached to the live VM; concurrent
   second mounts caused real I/O pauses (see above). `cbt-payload-proof`
   stops the disposable VM and waits until the VMI is gone before mounting
-  state/data for `qemu-img map`. Prefer `cbt-evidence` / `cbt-restore-proof`
-  for online-safe checks — those never need the live overlay at all, since
-  the backing-file *name* alone proves Incremental-vs-Full, and restore
-  rebases Incremental onto the Full artifact.
+  state/data for `qemu-img map`. Prefer `cbt-evidence` / `cbt-cycle` /
+  `cbt-restore-proof` for online-safe checks — those never need the live
+  overlay at all, since the backing-file *name* alone proves
+  Incremental-vs-Full, and restore rebases Incremental onto the Full
+  artifact.
 - The backup PVC is safe to mount from a second pod (it isn't part of the
   VM's own pod spec — it's attached transiently, only while a backup is
   actually copying data, and detached again afterward), but schedule that
