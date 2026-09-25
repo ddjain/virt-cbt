@@ -44,12 +44,24 @@ Section template: [`_TEMPLATE.md`](_TEMPLATE.md)
 **Phase C fail ⇒ stop.** Do not grade CBT if chaos missed the component or the inject window.
 **Phase D** uses `make cbt-evidence` (qcow2 `backing-filename`), not VMB status alone.
 
-## Event-driven inject + future `chaos-trigger.sh`
+## Event-driven inject + `chaos-trigger.sh`
 
 Prefer **Krkn event-driven triggers** (e.g. wait for VMB `Progressing=True`,
 `on_timeout: fail`) over sleep-based timing wherever it makes sense. Prefer
 **`krknctl`**; fall back to **`oc`/`kubectl`** only when krknctl is a poor fit.
 
-Each scenario folder will later get its own **`chaos-trigger.sh`** beside
+Each scenario folder gets its own **`chaos-trigger.sh`** beside
 `scenario_spec.md` (same directory). No shared `scripts/chaos-trigger.sh` for
-these V3 scenarios — keep inject logic with the scenario that owns it.
+these scenarios — keep inject logic with the scenario that owns it.
+
+To generate and run a trigger against a live cluster, use the
+**`cbt-chaos-test`** skill (`.claude/skills/cbt-chaos-test/`):
+
+```text
+cbt-chaos-test cbt-01
+```
+
+It reads the matching `scenario_spec.md`, resolves cluster targets, builds
+the `krknctl` command via the `krkn-scenario` subskill, asks for a short
+approval, writes `chaos-trigger.sh`, then executes against a CBT backup and
+grades with `make cbt-evidence`.

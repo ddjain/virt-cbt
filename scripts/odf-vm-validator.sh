@@ -26,9 +26,10 @@ log() {
   local level=$1 phase=$2; shift 2
   printf '[%s] [%s] [%s] %s\n' "$(date -u +%H:%M:%S)" "$level" "$phase" "$*"
 }
-run_id=''; run_dir=''; selected=(); passed=0; failed=0; inconclusive=0
+run_id=''; run_dir=''; report_command=''; selected=(); passed=0; failed=0; inconclusive=0
 start_report() {
   local cmd=$1
+  report_command=$cmd
   run_id="run-$(date -u +%Y%m%dT%H%M%SZ)-$cmd"
   run_dir="$REPORTS_DIR/$run_id"
   mkdir -p "$run_dir/per-vm" "$run_dir/diagnostics"
@@ -44,7 +45,7 @@ write_summary_txt() {
 Test Summary
 ------------
 Run:          $run_id
-Command:      $COMMAND
+Command:      $report_command
 Namespace:    $NAMESPACE
 Status:       $status
 Passed:       $passed
@@ -60,7 +61,7 @@ finish_report() {
   local status=$1
   completed=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   jq -n \
-    --arg id "$run_id" --arg c "$COMMAND" --arg ns "$NAMESPACE" \
+    --arg id "$run_id" --arg c "$report_command" --arg ns "$NAMESPACE" \
     --arg s "$started" --arg e "$completed" \
     --argjson sel "$(printf '%s\n' "${selected[@]}" | jq -Rsc 'split("\n")|map(select(length>0))')" \
     --argjson p "$passed" --argjson f "$failed" --argjson i "$inconclusive" \
@@ -73,7 +74,7 @@ finish_report() {
   return "$status"
 }
 parse_selection() {
-  local mode='' value='' x
+  local mode='' value='' x sel_out='' sel_rc=0
   while (($#)); do
     case "$1" in
       --vms|--count|--selector)
@@ -87,11 +88,15 @@ parse_selection() {
   done
   [[ -n $mode ]] || { echo 'ERROR: specify exactly one of VMS, N, SELECTOR, or ALL=1' >&2; return 2; }
   selected=()
+  # Capture helper output + exit status. Process substitution would swallow a
+  # non-zero exit after partial stdout and let callers act on a bad subset.
   if [[ $mode == all ]]; then
-    while IFS= read -r x; do selected+=("$x"); done < <("$ROOT/scripts/select-vms.sh" --kubeconfig "$KUBECONFIG" --namespace "$NAMESPACE" --base-selector "$VM_LABEL_SELECTOR" --all)
+    sel_out=$("$ROOT/scripts/select-vms.sh" --kubeconfig "$KUBECONFIG" --namespace "$NAMESPACE" --base-selector "$VM_LABEL_SELECTOR" --all) || sel_rc=$?
   else
-    while IFS= read -r x; do selected+=("$x"); done < <("$ROOT/scripts/select-vms.sh" --kubeconfig "$KUBECONFIG" --namespace "$NAMESPACE" --base-selector "$VM_LABEL_SELECTOR" "--$mode" "$value")
+    sel_out=$("$ROOT/scripts/select-vms.sh" --kubeconfig "$KUBECONFIG" --namespace "$NAMESPACE" --base-selector "$VM_LABEL_SELECTOR" "--$mode" "$value") || sel_rc=$?
   fi
+  (( sel_rc == 0 )) || return "$sel_rc"
+  while IFS= read -r x; do [[ -n $x ]] && selected+=("$x"); done <<<"$sel_out"
   ((${#selected[@]})) || { echo 'ERROR: selection matched no managed VMs' >&2; return 1; }
 }
 record() {
@@ -116,17 +121,50 @@ assert_owned_namespace() {
 virt_launcher_image() {
   # Prefer the named VM's virt-launcher compute image; fall back to any
   # virt-launcher in the same namespace (never cluster-wide -A).
+  # jq's `[...][0]` yields JSON null (text "null") on empty match; use // empty.
   local vm=${1:-} image=''
   if [[ -n $vm ]]; then
-    image=$(oc get pods -n "$NAMESPACE" -o json 2>/dev/null | jq -er --arg prefix "virt-launcher-$vm-" \
-      '[.items[] | select(.metadata.name | startswith($prefix)) | .spec.containers[] | select(.name=="compute") | .image][0]' 2>/dev/null) || true
+    image=$(oc get pods -n "$NAMESPACE" -o json 2>/dev/null | jq -r --arg prefix "virt-launcher-$vm-" \
+      '([.items[] | select(.metadata.name | startswith($prefix)) | .spec.containers[] | select(.name=="compute") | .image][0] // empty)' 2>/dev/null) || true
   fi
-  if [[ -z $image ]]; then
-    image=$(oc get pods -n "$NAMESPACE" -o json 2>/dev/null | jq -er \
-      '[.items[] | select(.metadata.name | startswith("virt-launcher-")) | .spec.containers[] | select(.name=="compute") | .image][0]' 2>/dev/null) || true
+  if [[ -z ${image:-} || $image == null ]]; then
+    image=$(oc get pods -n "$NAMESPACE" -o json 2>/dev/null | jq -r \
+      '([.items[] | select(.metadata.name | startswith("virt-launcher-")) | .spec.containers[] | select(.name=="compute") | .image][0] // empty)' 2>/dev/null) || true
   fi
-  [[ -n $image ]] || { echo "ERROR: no virt-launcher pod in namespace $NAMESPACE to source a qemu-img-capable image" >&2; return 1; }
+  [[ -n ${image:-} && $image != null ]] || {
+    echo "ERROR: no virt-launcher pod in namespace $NAMESPACE to source a qemu-img-capable image" >&2
+    return 1
+  }
   printf '%s' "$image"
+}
+# Scalar checkpoint name from either API shape (string or {name,...} object).
+tracker_checkpoint_name() {
+  local tracker=$1
+  oc get virtualmachinebackuptracker "$tracker" -n "$NAMESPACE" -o json 2>/dev/null |
+    jq -r '(.status.latestCheckpoint
+      | if type=="object" then .name
+        elif type=="string" then .
+        else empty end) // .status.checkpointName // empty' 2>/dev/null || true
+}
+# Ephemeral guest SSH: never persist host keys into the operator's known_hosts.
+# virtctl defaults to ~/.ssh/kubevirt_known_hosts; local OpenSSH with
+# StrictHostKeyChecking=no would also write ~/.ssh/known_hosts unless redirected.
+guest_ssh() {
+  local vm=$1; shift
+  local command=${1-} kh rc=0
+  [[ -n $SSH_KEY ]] || { echo 'ERROR: SSH_KEY is required' >&2; return 2; }
+  kh=$(mktemp "${TMPDIR:-/tmp}/cbt-known-hosts.XXXXXX") || return 1
+  virtctl ssh -n "$NAMESPACE" -i "$SSH_KEY" --known-hosts="$kh" \
+    --local-ssh-opts="-o StrictHostKeyChecking=no" \
+    --local-ssh-opts="-o UserKnownHostsFile=$kh" \
+    --local-ssh-opts="-o GlobalKnownHostsFile=/dev/null" \
+    --local-ssh-opts="-o UpdateHostKeys=no" \
+    --local-ssh-opts="-o ConnectTimeout=15" \
+    --local-ssh-opts="-o ServerAliveInterval=10" \
+    --local-ssh-opts="-o ServerAliveCountMax=3" \
+    "$SSH_USER@vm/$vm" --command "${command:-hostname}" || rc=$?
+  rm -f "$kh"
+  return "$rc"
 }
 check_prereqs() {
   for t in oc virtctl kube-burner jq; do need "$t" || return; done
@@ -149,7 +187,32 @@ check_prereqs() {
 }
 generate_keys() { [[ -n $SSH_KEY ]] || SSH_KEY="$ROOT/keys/cbt-validator"; mkdir -p "$(dirname "$SSH_KEY")"; if [[ ! -r $SSH_KEY ]]; then ssh-keygen -q -t ed25519 -N '' -f "$SSH_KEY"; fi; SSH_PUBLIC_KEY=$(<"$SSH_KEY.pub"); echo "SSH key: $SSH_KEY"; }
 render_job() { local out=$1; sed -e "s|REPLACE_NAMESPACE|$NAMESPACE|g" -e "s|REPLACE_REPLICAS|$VM_COUNT|g" -e "s|REPLACE_VM_PREFIX|$VM_PREFIX|g" -e "s|REPLACE_CONTAINER_IMAGE|$CONTAINER_IMAGE|g" -e "s|REPLACE_SSH_USER|$SSH_USER|g" -e "s|REPLACE_SSH_PUBLIC_KEY|$SSH_PUBLIC_KEY|g" -e "s|REPLACE_VM_CPU|$VM_CPU|g" -e "s|REPLACE_VM_MEMORY|$VM_MEMORY|g" -e "s|REPLACE_DATA_SIZE|$DATA_SIZE|g" -e "s|REPLACE_BACKUP_SIZE|$BACKUP_SIZE|g" -e "s|REPLACE_DATA_STORAGE_CLASS|$DATA_STORAGE_CLASS|g" -e "s|REPLACE_BACKUP_STORAGE_CLASS|$BACKUP_STORAGE_CLASS|g" -e "s|REPLACE_TARGET_NODE|$TARGET_NODE|g" -e "s|REPLACE_MARKER_BASE_MIB|$RESTORE_PROOF_BASE_MIB|g" "$ROOT/kube-burner/odf-cbt-density.yml" >"$out"; }
-density_setup() { [[ $VM_COUNT =~ ^[1-9][0-9]*$ ]] || { echo 'ERROR: VM_COUNT must be positive'; return 2; }; local existing; existing=$(oc get namespace "$NAMESPACE" -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}' 2>/dev/null || true); if oc get namespace "$NAMESPACE" >/dev/null 2>&1; then [[ $existing == odf-cbt-validator ]] || { echo "ERROR: namespace $NAMESPACE is not utility-owned"; return 1; }; else oc create namespace "$NAMESPACE"; oc label namespace "$NAMESPACE" app.kubernetes.io/managed-by=odf-cbt-validator --overwrite; fi; if oc get vm -n "$NAMESPACE" -l "$VM_LABEL_SELECTOR" -o name | grep -q .; then echo 'ERROR: managed VM pool already exists; teardown first' >&2; return 1; fi; local job; mkdir -p "$ROOT/kube-burner/rendered"; job=$(mktemp "$ROOT/kube-burner/rendered/density.XXXX.yml"); render_job "$job"; (cd "$ROOT/kube-burner" && kube-burner init --config "rendered/$(basename "$job")" --kubeconfig "$KUBECONFIG" --log-level error); rm -f "$job"; wait_pool; }
+density_setup() {
+  [[ $VM_COUNT =~ ^[1-9][0-9]*$ ]] || { echo 'ERROR: VM_COUNT must be positive'; return 2; }
+  local existing
+  existing=$(oc get namespace "$NAMESPACE" -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}' 2>/dev/null || true)
+  if oc get namespace "$NAMESPACE" >/dev/null 2>&1; then
+    [[ $existing == odf-cbt-validator ]] || { echo "ERROR: namespace $NAMESPACE is not utility-owned"; return 1; }
+  else
+    oc create namespace "$NAMESPACE"
+    oc label namespace "$NAMESPACE" app.kubernetes.io/managed-by=odf-cbt-validator --overwrite
+  fi
+  if oc get vm -n "$NAMESPACE" -l "$VM_LABEL_SELECTOR" -o name | grep -q .; then
+    echo 'ERROR: managed VM pool already exists; teardown first' >&2
+    return 1
+  fi
+  local job
+  mkdir -p "$ROOT/kube-burner/rendered"
+  # Darwin mktemp requires ≥6 trailing X chars and does not treat a .yml suffix
+  # as separate from the template — density.XXXX.yml becomes the literal name.
+  job=$(mktemp "$ROOT/kube-burner/rendered/density.XXXXXX")
+  if ! render_job "$job" || ! (cd "$ROOT/kube-burner" && kube-burner init --config "rendered/$(basename "$job")" --kubeconfig "$KUBECONFIG" --log-level error); then
+    rm -f "$job"
+    return 1
+  fi
+  rm -f "$job"
+  wait_pool
+}
 wait_pool() {
   local deadline=$((SECONDS+STABILIZE_TIMEOUT)) count=0 ready=0 x
   log INFO SETUP "Waiting for $VM_COUNT VMs ready+CBT (stabilize=${STABILIZE_TIMEOUT}s)"
@@ -274,8 +337,7 @@ write_backup_baseline() {
   # JSON (pretty-printed/multiline captures were producing "invalid JSON text").
   local vm=$1 tracker=$2 out=$3
   local checkpoint
-  checkpoint=$(oc get virtualmachinebackuptracker "$tracker" -n "$NAMESPACE" -o json 2>/dev/null |
-    jq -r '.status.latestCheckpoint // .status.checkpointName // empty' 2>/dev/null || true)
+  checkpoint=$(tracker_checkpoint_name "$tracker")
   if ! oc get vmi "$vm" -n "$NAMESPACE" -o json 2>/dev/null |
       jq -c --arg vm "$vm" --arg tracker "$tracker" --arg checkpoint "$checkpoint" \
         --arg captured "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -293,7 +355,7 @@ backup_one() {
   local vm=$1 name=$2 tracker="$vm-tracker" pvc="$vm-backup-output"
   local checkpoint t0 baseline wait_rc=0
   assert_owned_namespace || return 1
-  checkpoint=$(oc get virtualmachinebackuptracker "$tracker" -n "$NAMESPACE" -o json | jq -r '.status.latestCheckpoint // .status.checkpointName // empty')
+  checkpoint=$(tracker_checkpoint_name "$tracker")
   [[ -z $checkpoint ]] || { echo "full backup already exists for $vm; use cbt-backup or recreate density"; return 1; }
   oc delete virtualmachinebackup "$name" -n "$NAMESPACE" --ignore-not-found --wait=true --timeout="${TIMEOUT}s"
   t0=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -320,7 +382,7 @@ cbt_one() {
   local before t0 baseline wait_rc=0
   assert_owned_namespace || return 1
   oc get virtualmachinebackup "$vm-full" -n "$NAMESPACE" >/dev/null
-  before=$(oc get virtualmachinebackuptracker "$tracker" -n "$NAMESPACE" -o json | jq -r '.status.latestCheckpoint // .status.checkpointName // empty')
+  before=$(tracker_checkpoint_name "$tracker")
   [[ -n $before ]] || { echo "no full checkpoint for $vm"; return 1; }
   oc delete virtualmachinebackup "$name" -n "$NAMESPACE" --ignore-not-found --wait=true --timeout="${TIMEOUT}s"
   t0=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -405,23 +467,29 @@ backup_reset_selected() {
 }
 cbt_diagnostics_selected() {
   # Ad-hoc forensic dump against existing Full and/or Incremental VMBs.
-  local vm i=0 total name
+  local vm i=0 total name collected
   parse_selection "$@"
   start_report cbt-diagnostics
   total=${#selected[@]}
   for vm in "${selected[@]}"; do
     ((i+=1))
+    collected=0
     log INFO TEST "[$i/$total] cbt-diagnostics $vm"
     for name in "$vm-full" "$vm-incremental"; do
       if oc get virtualmachinebackup "$name" -n "$NAMESPACE" >/dev/null 2>&1; then
         collect_backup_diagnostics "$vm" "$name" ""
+        ((collected+=1))
       else
         log INFO DIAG "Skip $name (not found)"
       fi
     done
-    record "$vm" PASS 'Diagnostics collected for existing backups'
+    if ((collected == 0)); then
+      record "$vm" INCONCLUSIVE 'No Full or Incremental backup found to diagnose'
+    else
+      record "$vm" PASS 'Diagnostics collected for existing backups'
+    fi
   done
-  finish_report 0
+  ((failed==0 && inconclusive==0)) && finish_report 0 || finish_report 1
 }
 run_selected() {
   local action=$1; shift
@@ -455,15 +523,23 @@ run_selected() {
 }
 guest_check() {
   # Prints max(seq) on success to stdout; returns nonzero on failure.
+  # Integrity + digest/sequence run in one Python process with a bounded
+  # busy_timeout so a failed integrity_check cannot be swallowed by a later
+  # successful query, and transient writer locks do not false-fail verify.
   local vm=$1 output max_seq
   [[ -n $SSH_KEY ]] || return 1
-  output=$(virtctl ssh -n "$NAMESPACE" -i "$SSH_KEY" --known-hosts=/dev/null \
-    --local-ssh-opts='-o' --local-ssh-opts='StrictHostKeyChecking=no' \
-    --local-ssh-opts='-o' --local-ssh-opts='ConnectTimeout=15' \
-    --local-ssh-opts='-o' --local-ssh-opts='ServerAliveInterval=10' \
-    --local-ssh-opts='-o' --local-ssh-opts='ServerAliveCountMax=3' \
-    "$SSH_USER@vm/$vm" --command \
-    "test -f /data/vm-validator/workload.db -a -f /data/vm-validator/workload.log; mountpoint -q /data; sqlite3 /data/vm-validator/workload.db 'pragma integrity_check' | grep -qx ok; python3 -c \"import sqlite3,hashlib; c=sqlite3.connect('/data/vm-validator/workload.db'); r=c.execute('select seq,payload,digest from records order by seq').fetchall(); assert r and [x[0] for x in r]==list(range(1,len(r)+1)); assert all(hashlib.sha256(x[1].encode()).hexdigest()==x[2] for x in r); print('GUEST_SEQ='+str(r[-1][0]))\"") || return 1
+  output=$(guest_ssh "$vm" \
+    "test -f /data/vm-validator/workload.db -a -f /data/vm-validator/workload.log && mountpoint -q /data && python3 -c \"
+import sqlite3, hashlib
+c = sqlite3.connect('/data/vm-validator/workload.db', timeout=30.0)
+c.execute('PRAGMA busy_timeout=30000')
+row = c.execute('PRAGMA integrity_check').fetchone()
+assert row and row[0] == 'ok', row
+r = c.execute('select seq, payload, digest from records order by seq').fetchall()
+assert r and [x[0] for x in r] == list(range(1, len(r) + 1))
+assert all(hashlib.sha256(x[1].encode()).hexdigest() == x[2] for x in r)
+print('GUEST_SEQ=' + str(r[-1][0]))
+\"") || return 1
   max_seq=$(grep -Eo 'GUEST_SEQ=[0-9]+' <<<"$output" | tail -1 | cut -d= -f2)
   [[ -n $max_seq ]] || return 1
   printf '%s\n' "$max_seq"
@@ -487,7 +563,24 @@ verify_one() {
   }
   log INFO VALIDATE "Guest workload advanced: seq $seq1 → $seq2"
 }
-status_selected() { if (($#==0)); then set -- --all; fi; parse_selection "$@"; printf '%-32s %-8s %-10s %-12s %-12s %-12s %s\n' VM READY PHASE CBT FULL INCREMENTAL CHECKPOINT; local vm full inc cp; for vm in "${selected[@]}"; do full=$(oc get virtualmachinebackup "$vm-full" -n "$NAMESPACE" -o json 2>/dev/null | jq -r '.status.type // .status.conditions[0].reason // "-"' 2>/dev/null) || full="-"; inc=$(oc get virtualmachinebackup "$vm-incremental" -n "$NAMESPACE" -o json 2>/dev/null | jq -r '.status.type // .status.conditions[0].reason // "-"' 2>/dev/null) || inc="-"; cp=$(oc get virtualmachinebackuptracker "$vm-tracker" -n "$NAMESPACE" -o json 2>/dev/null | jq -r '.status.latestCheckpoint // .status.checkpointName // "-"' 2>/dev/null) || cp="-"; printf '%-32s %-8s %-10s %-12s %-12s %-12s %s\n' "$vm" "$(oc get vm "$vm" -n "$NAMESPACE" -o jsonpath='{.status.ready}' 2>/dev/null || echo -)" "$(oc get vmi "$vm" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || echo -)" "$(oc get vm "$vm" -n "$NAMESPACE" -o jsonpath='{.status.changedBlockTracking.state}' 2>/dev/null || echo -)" "$full" "$inc" "$cp"; done; }
+status_selected() {
+  if (($#==0)); then set -- --all; fi
+  parse_selection "$@"
+  printf '%-32s %-8s %-10s %-12s %-12s %-12s %s\n' VM READY PHASE CBT FULL INCREMENTAL CHECKPOINT
+  local vm full inc cp
+  for vm in "${selected[@]}"; do
+    full=$(oc get virtualmachinebackup "$vm-full" -n "$NAMESPACE" -o json 2>/dev/null | jq -r '.status.type // .status.conditions[0].reason // "-"' 2>/dev/null) || full="-"
+    inc=$(oc get virtualmachinebackup "$vm-incremental" -n "$NAMESPACE" -o json 2>/dev/null | jq -r '.status.type // .status.conditions[0].reason // "-"' 2>/dev/null) || inc="-"
+    cp=$(tracker_checkpoint_name "$vm-tracker")
+    [[ -n $cp ]] || cp="-"
+    printf '%-32s %-8s %-10s %-12s %-12s %-12s %s\n' \
+      "$vm" \
+      "$(oc get vm "$vm" -n "$NAMESPACE" -o jsonpath='{.status.ready}' 2>/dev/null || echo -)" \
+      "$(oc get vmi "$vm" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || echo -)" \
+      "$(oc get vm "$vm" -n "$NAMESPACE" -o jsonpath='{.status.changedBlockTracking.state}' 2>/dev/null || echo -)" \
+      "$full" "$inc" "$cp"
+  done
+}
 ssh_guest() {
   local vm='' cmd=''
   while (($#)); do case "$1" in
@@ -495,16 +588,10 @@ ssh_guest() {
     --cmd) cmd=${2-}; shift 2;;
     *) return 2;;
   esac; done
-  # Prefer explicit --cmd; fall back to CMD env (Make preserves spaces that way).
+  # Prefer explicit --cmd; fall back to CMD env (Make preserves spaces/quotes that way).
   [[ -z $cmd && -n ${CMD:-} ]] && cmd=$CMD
   [[ -n $vm && $vm == "$VM_PREFIX"-* ]] || { echo 'ERROR: VM is required and must use configured prefix' >&2; return 2; }
-  [[ -n $SSH_KEY ]] || { echo 'ERROR: SSH_KEY is required' >&2; return 2; }
-  virtctl ssh -n "$NAMESPACE" -i "$SSH_KEY" --known-hosts=/dev/null \
-    --local-ssh-opts='-o StrictHostKeyChecking=no' \
-    --local-ssh-opts='-o ConnectTimeout=15' \
-    --local-ssh-opts='-o ServerAliveInterval=10' \
-    --local-ssh-opts='-o ServerAliveCountMax=3' \
-    "$SSH_USER@vm/$vm" --command "${cmd:-hostname}"
+  guest_ssh "$vm" "${cmd:-hostname}"
 }
 report() { local f; f=$(find "$REPORTS_DIR" -name summary.json -print | sort | sed -n '$p'); [[ -n $f ]] && cat "$f" || { echo 'No reports'; return 1; }; }
 list_reports() { find "$REPORTS_DIR" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | sort -r; }
@@ -529,20 +616,15 @@ proof_cleanup() {
 }
 proof_guest_command() {
   local vm=$1 command=$2
-  virtctl ssh -n "$NAMESPACE" -i "$SSH_KEY" --known-hosts=/dev/null \
-    --local-ssh-opts='-o' --local-ssh-opts='StrictHostKeyChecking=no' \
-    --local-ssh-opts='-o' --local-ssh-opts='ConnectTimeout=15' \
-    --local-ssh-opts='-o' --local-ssh-opts='ServerAliveInterval=10' \
-    --local-ssh-opts='-o' --local-ssh-opts='ServerAliveCountMax=3' \
-    "$SSH_USER@vm/$vm" --command "$command"
+  guest_ssh "$vm" "$command"
 }
 wait_for_proof_guest_ssh() {
   local vm=$1 deadline=$((SECONDS+TIMEOUT)) output=''
-  echo "Waiting for guest SSH on $vm"
+  echo "Waiting for guest SSH on $vm" >&2
   while ((SECONDS < deadline)); do
     if output=$(proof_guest_command "$vm" 'echo CBT_PROOF_SSH_READY' 2>&1) &&
        [[ $output == *CBT_PROOF_SSH_READY* ]]; then
-      echo "Guest SSH ready: $vm"
+      echo "Guest SSH ready: $vm" >&2
       return 0
     fi
     sleep 5
@@ -552,12 +634,12 @@ wait_for_proof_guest_ssh() {
 }
 wait_for_proof_guest_data() {
   local vm=$1 deadline=$((SECONDS+TIMEOUT)) output=''
-  echo "Waiting for /data mount on $vm"
+  echo "Waiting for /data mount on $vm" >&2
   while ((SECONDS < deadline)); do
     if output=$(proof_guest_command "$vm" \
       'sudo -n sh -c "mountpoint -q /data && mkdir -p /data/vm-validator && echo CBT_PROOF_DATA_READY"' 2>&1) &&
        [[ $output == *CBT_PROOF_DATA_READY* ]]; then
-      echo "Guest /data ready: $vm"
+      echo "Guest /data ready: $vm" >&2
       return 0
     fi
     sleep 5
@@ -701,8 +783,11 @@ cbt_payload_proof() {
   seed_bytes=$((256*1024*1024))
   wait_for_proof_guest_ssh "$vm"
 
+  # Stop guest writers via systemctl only. Do not pkill -f patterns that also
+  # appear in this command's argv (e.g. vm-write-stress.service) — that can
+  # kill the remote shell before umount runs.
   disk_bytes=$(proof_guest_command "$vm" \
-    "sudo -n sh -c 'if command -v cloud-init >/dev/null 2>&1; then timeout ${TIMEOUT}s cloud-init status --wait >/dev/null 2>&1 || true; fi; if command -v systemctl >/dev/null 2>&1; then systemctl disable --now vm-validator.service >/dev/null 2>&1 || true; fi; if command -v pkill >/dev/null 2>&1; then pkill -f \"[v]m-validator.py\" >/dev/null 2>&1 || true; fi; sync; if mountpoint -q /data; then umount /data || exit 1; fi; blockdev --getsize64 /dev/vdc'")
+    "sudo -n sh -c 'if command -v cloud-init >/dev/null 2>&1; then timeout ${TIMEOUT}s cloud-init status --wait >/dev/null 2>&1 || true; fi; if command -v systemctl >/dev/null 2>&1; then systemctl disable --now vm-validator.service >/dev/null 2>&1 || true; systemctl disable --now vm-write-stress.service >/dev/null 2>&1 || true; fi; sync; sleep 2; if mountpoint -q /data; then umount /data || exit 1; fi; blockdev --getsize64 /dev/vdc'")
   [[ $disk_bytes =~ ^[0-9]+$ && $disk_bytes -ge $((2*1024*1024*1024)) ]] || {
     echo "ERROR: proof needs a data disk of at least 2GiB; got ${disk_bytes:-no size}" >&2
     return 1
@@ -901,7 +986,7 @@ convert_backup_chain_to_pvc() {
   image=$(virt_launcher_image "$vm") || return 1
 
   echo "Creating restore PVC $restore_pvc" >&2
-  cat <<EOF | oc apply -f -
+  cat <<EOF | oc apply -f - >/dev/null
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -916,7 +1001,7 @@ spec:
   resources: {requests: {storage: $DATA_SIZE}}
   storageClassName: $DATA_STORAGE_CLASS
 EOF
-  oc wait --for=jsonpath='{.status.phase}'=Bound pvc/"$restore_pvc" -n "$NAMESPACE" --timeout="${TIMEOUT}s"
+  oc wait --for=jsonpath='{.status.phase}'=Bound pvc/"$restore_pvc" -n "$NAMESPACE" --timeout="${TIMEOUT}s" >/dev/null
 
   full_checkpoint=$(oc get virtualmachinebackup "$full_name" -n "$NAMESPACE" -o json | jq -er '.status.checkpointName')
   inc_checkpoint=$(oc get virtualmachinebackup "$inc_name" -n "$NAMESPACE" -o json | jq -er '.status.checkpointName')
@@ -925,7 +1010,7 @@ EOF
 
   echo "Converting Full+Incremental chain onto $restore_pvc (rebase Incremental onto Full, then qemu-img convert)" >&2
   oc delete pod "$converter" -n "$NAMESPACE" --ignore-not-found --wait=true --timeout="${TIMEOUT}s" >/dev/null
-  cat <<EOF | oc apply -f -
+  cat <<EOF | oc apply -f - >/dev/null
 apiVersion: v1
 kind: Pod
 metadata:
@@ -975,7 +1060,7 @@ $affinity
   - name: work
     emptyDir: {sizeLimit: 2Gi}
 EOF
-  oc wait --for=jsonpath='{.status.phase}'=Succeeded pod/"$converter" -n "$NAMESPACE" --timeout="${TIMEOUT}s" || {
+  oc wait --for=jsonpath='{.status.phase}'=Succeeded pod/"$converter" -n "$NAMESPACE" --timeout="${TIMEOUT}s" >/dev/null || {
     echo 'ERROR: restore converter pod did not Succeed' >&2
     oc logs -n "$NAMESPACE" "$converter" -c convert >&2 || true
     return 1
@@ -993,7 +1078,7 @@ boot_restore_vm() {
   local restore_vm="$vm-restored" restore_pvc="$vm-restore-data"
 
   echo "Booting restore VM $restore_vm from converted PVC" >&2
-  cat <<EOF | oc apply -f -
+  cat <<EOF | oc apply -f - >/dev/null
 apiVersion: v1
 kind: Secret
 metadata:
@@ -1045,8 +1130,8 @@ spec:
         - {name: cloudinitdisk, cloudInitNoCloud: {secretRef: {name: $restore_vm-userdata}}}
         - {name: datadisk, persistentVolumeClaim: {claimName: $restore_pvc}}
 EOF
-  oc wait --for=jsonpath='{.status.ready}'=true vm/"$restore_vm" -n "$NAMESPACE" --timeout="${TIMEOUT}s"
-  oc wait --for=jsonpath='{.status.phase}'=Running vmi/"$restore_vm" -n "$NAMESPACE" --timeout="${TIMEOUT}s"
+  oc wait --for=jsonpath='{.status.ready}'=true vm/"$restore_vm" -n "$NAMESPACE" --timeout="${TIMEOUT}s" >/dev/null
+  oc wait --for=jsonpath='{.status.phase}'=Running vmi/"$restore_vm" -n "$NAMESPACE" --timeout="${TIMEOUT}s" >/dev/null
   wait_for_proof_guest_ssh "$restore_vm"
 }
 
@@ -1101,8 +1186,7 @@ cbt_cycle_one() {
     echo "ERROR: $full_name already exists; run 'make backup-reset' first" >&2
     return 1
   fi
-  checkpoint=$(oc get virtualmachinebackuptracker "$vm-tracker" -n "$NAMESPACE" -o json 2>/dev/null |
-    jq -r '.status.latestCheckpoint // .status.checkpointName // empty' 2>/dev/null || true)
+  checkpoint=$(tracker_checkpoint_name "$vm-tracker")
   if [[ -n $checkpoint ]]; then
     echo "ERROR: tracker $vm-tracker already has checkpoint '$checkpoint'; run 'make backup-reset' first" >&2
     return 1
@@ -1129,6 +1213,10 @@ cbt_cycle_one() {
   verify_one "$vm" || return $?
 
   restored_hash=$(restore_chain_and_verify_hash "$vm" "$marker" "$hash1") || return 1
+  [[ $restored_hash =~ ^[0-9a-f]{64}$ && $restored_hash == "$hash1" ]] || {
+    echo "ERROR: restore-hash capture invalid (got '${restored_hash:-empty}')" >&2
+    return 1
+  }
 
   full_checkpoint=$(oc get virtualmachinebackup "$full_name" -n "$NAMESPACE" -o json | jq -r '.status.checkpointName // empty')
   inc_checkpoint=$(oc get virtualmachinebackup "$inc_name" -n "$NAMESPACE" -o json | jq -r '.status.checkpointName // empty')
@@ -1137,7 +1225,8 @@ cbt_cycle_one() {
     --arg hash0 "$hash0" --arg hash1 "$hash1" --arg restoredHash "$restored_hash" \
     --arg fullCheckpoint "$full_checkpoint" --arg incrementalCheckpoint "$inc_checkpoint" \
     --argjson baseMib "$base_mib" --argjson appendMib "$append_mib" \
-    '{vm:$vm,status:"PASS",markerPath:$markerPath,baseMib:$baseMib,appendMib:$appendMib,hash0:$hash0,hash1:$hash1,restoredHash:$restoredHash,fullCheckpoint:$fullCheckpoint,incrementalCheckpoint:$incrementalCheckpoint,match:true,message:"Full+Incremental cycle: qcow2 evidence, guest workload, and restored marker hash all passed"}' \
+    --argjson match "$([[ $restored_hash == "$hash1" ]] && echo true || echo false)" \
+    '{vm:$vm,status:"PASS",markerPath:$markerPath,baseMib:$baseMib,appendMib:$appendMib,hash0:$hash0,hash1:$hash1,restoredHash:$restoredHash,fullCheckpoint:$fullCheckpoint,incrementalCheckpoint:$incrementalCheckpoint,match:$match,message:"Full+Incremental cycle: qcow2 evidence, guest workload, and restored marker hash all passed"}' \
     >"$run_dir/evidence/$vm-cbt-cycle.json"
   echo "CBT cycle PASS for $vm: restored hash matches hash1 ($hash1)"
   return 0
@@ -1223,6 +1312,13 @@ cbt_restore_proof() {
     proof_report_done=1
     return 1
   }
+  [[ $restored_hash =~ ^[0-9a-f]{64}$ && $restored_hash == "$hash2" ]] || {
+    echo "ERROR: restore-hash capture invalid (got '${restored_hash:-empty}')" >&2
+    ((failed+=1))
+    finish_report 1
+    proof_report_done=1
+    return 1
+  }
 
   full_checkpoint=$(oc get virtualmachinebackup "$full_name" -n "$NAMESPACE" -o json | jq -r '.status.checkpointName // empty')
   inc_checkpoint=$(oc get virtualmachinebackup "$inc_name" -n "$NAMESPACE" -o json | jq -r '.status.checkpointName // empty')
@@ -1231,7 +1327,8 @@ cbt_restore_proof() {
     --arg hash1 "$hash1" --arg hash2 "$hash2" --arg restoredHash "$restored_hash" \
     --arg fullCheckpoint "$full_checkpoint" --arg incrementalCheckpoint "$inc_checkpoint" \
     --argjson baseMib "$base_mib" --argjson appendMib "$append_mib" \
-    '{vm:$vm,restoreVm:$restoreVm,status:"PASS",proofPath:$proofPath,baseMib:$baseMib,appendMib:$appendMib,hash1:$hash1,hash2:$hash2,restoredHash:$restoredHash,fullCheckpoint:$fullCheckpoint,incrementalCheckpoint:$incrementalCheckpoint,match:true,message:"Restored Full+Incremental chain reproduces post-Incremental guest file hash"}' \
+    --argjson match "$([[ $restored_hash == "$hash2" ]] && echo true || echo false)" \
+    '{vm:$vm,restoreVm:$restoreVm,status:"PASS",proofPath:$proofPath,baseMib:$baseMib,appendMib:$appendMib,hash1:$hash1,hash2:$hash2,restoredHash:$restoredHash,fullCheckpoint:$fullCheckpoint,incrementalCheckpoint:$incrementalCheckpoint,match:$match,message:"Restored Full+Incremental chain reproduces post-Incremental guest file hash"}' \
     | tee "$run_dir/evidence/$vm-restore-proof.json" >"$run_dir/per-vm/$vm.json"
 
   ((passed+=1))

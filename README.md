@@ -121,7 +121,9 @@ make backup VMS=fedora-cbt-1
 
 Selection flags (used by `backup`, `cbt-backup`, `verify`, `status`,
 `cbt-evidence`, `discover-vms`): exactly one of `VMS=a,b`, `N=2` (first N by
-name), `SELECTOR=k=v`, or `ALL=1`.
+natural/version name order, so `fedora-cbt-2` precedes `fedora-cbt-10`),
+`SELECTOR=k=v`, or `ALL=1`. Make rejects conflicting modes; spaced CSV
+(`VMS='a, b'`) is accepted.
 
 ### 4. Take an Incremental (CBT) backup
 
@@ -243,7 +245,8 @@ already exists (run `backup-reset` first — it does not auto-reset).
   `<vm>-full` / `<vm>-incremental` backups (CR YAML + controller/handler/launcher
   logs). Same bundle shape as the automatic dump written during
   `make backup` / `make cbt-backup`. Does not take new backups and does not
-  decide Full vs Incremental correctness.
+  decide Full vs Incremental correctness. If neither backup exists for a VM,
+  that VM is recorded `INCONCLUSIVE` (not a green PASS).
 - **`make cbt-payload-proof`** — the heavyweight, from-first-principles
   proof that CBT works at all. Creates its **own disposable namespace**
   (`cbt-proof-<timestamp>`) with **one throwaway VM**, seeds two known byte

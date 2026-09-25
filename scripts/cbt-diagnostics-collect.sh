@@ -102,6 +102,7 @@ vmi_node=''
 launcher_pod=''
 if vmi_json=$(oc get vmi "$VM" -n "$NAMESPACE" -o json 2>/dev/null); then
   printf '%s\n' "$vmi_json" >"$OUT_DIR/cluster/vmi-full.json"
+  record_artifact cluster/vmi-full.json ok
   jq '{phase:.status.phase,node:.status.nodeName,activePods:.status.activePods,cbt:.status.changedBlockTracking,conditions:.status.conditions}' \
     <<<"$vmi_json" >"$OUT_DIR/cluster/vmi-cbt.json" 2>/dev/null
   vmi_node=$(jq -r '.status.nodeName // empty' <<<"$vmi_json")
@@ -114,6 +115,7 @@ if vmi_json=$(oc get vmi "$VM" -n "$NAMESPACE" -o json 2>/dev/null); then
   fi
   record_artifact vmi-cbt.json ok
 else
+  record_artifact cluster/vmi-full.json error 'VMI not found'
   record_artifact vmi-cbt.json error 'VMI not found'
 fi
 

@@ -27,7 +27,7 @@ make density-teardown          # config NAMESPACE only
 # make density-teardown ALL=1 CONFIRM=1  # every utility-owned namespace
 ```
 
-`N=2` and `n=2` select the first two utility-owned VM names in lexical order (1-indexed: `fedora-cbt-1`, `fedora-cbt-2`). The same selector must be used for Full, Incremental, and verify operations so they use the same trackers. Use `VMS=fedora-cbt-1,fedora-cbt-2` for an exact selection, `SELECTOR=some-label=value` for a label subset, or `ALL=1` for every managed VM. Selection is mandatory for backup and verification. Duplicate, missing, unowned, zero, or over-sized selections fail.
+`N=2` and `n=2` select the first two utility-owned VM names in natural/version order (1-indexed: `fedora-cbt-1`, `fedora-cbt-2` — not lexical `fedora-cbt-10`). The same selector must be used for Full, Incremental, and verify operations so they use the same trackers. Use `VMS=fedora-cbt-1,fedora-cbt-2` for an exact selection, `SELECTOR=some-label=value` for a label subset, or `ALL=1` for every managed VM. Selection is mandatory for backup and verification. Duplicate, missing, unowned, empty CSV members, zero, or over-sized selections fail. Make requires exactly one of `VMS` / `N` / `SELECTOR` / `ALL`.
 
 `e2e N=2` performs `density-setup` then `cbt-cycle` for the first N VMs (marker rewrite → Full → append → Incremental → guest+qcow2 verify → restore-hash) while leaving the pool in place. Each VM uses `${vm}-backup-output` and `${vm}-tracker`. Backups and restore conversion run serially (the backup-output PVC is RWO). Reports are written below `REPORTS_DIR` with `summary.json`, `summary.txt`, `run.log`, and per-VM results (`PASS` / `FAIL` / `INCONCLUSIVE`).
 

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "krkn-scenario": {
+      "source": "krkn-chaos/krkn-skills",
+      "sourceType": "github",
+      "skillPath": "skills/krkn-scenario/SKILL.md",
+      "computedHash": "cfdb80f49681222d83d055dfa1d0e25990e01ec886cb83034f59a2c6398cee76"
+    }
+  }
+}

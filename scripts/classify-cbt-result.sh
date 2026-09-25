@@ -61,7 +61,11 @@ jq -n \
   def failed: condition("Failed");
   def cbt_enabled: ($vm.status.changedBlockTracking.state == "Enabled");
   def vmi_running: ($vmi.status.phase == "Running");
-  def checkpoint: ($tracker.status.latestCheckpoint // "");
+  def checkpoint:
+    ($tracker.status.latestCheckpoint
+      | if type == "object" then .name
+        elif type == "string" then .
+        else empty end) // "";
   def reported_type: ($vmb.status.type // "Unknown");
   def physical_type: ($evidence.physicalType // "Unknown");
   # classification is decided from evidenceOk (physical qcow2 evidence) plus
@@ -69,8 +73,8 @@ jq -n \
   # inconclusive = could not measure (infra/API/inspect failure).
   def classification:
     if ($inspectable | not) then "inconclusive"
-    elif evidenceOk and vmi_running then "pass"
-    elif (physical_type == "Full") and vmi_running and not failed then "safe_full_fallback"
+    elif $evidenceOk and vmi_running then "pass"
+    elif (physical_type == "Full") and vmi_running and (failed | not) then "safe_full_fallback"
     elif failed then "bounded_failure"
     else "fail"
     end;
@@ -82,7 +86,7 @@ jq -n \
     reportedType: reported_type,
     physicalType: physical_type,
     evidence: $evidence,
-    evidenceOk: evidenceOk,
+    evidenceOk: $evidenceOk,
     inspectable: $inspectable,
     done: done,
     failed: failed,
