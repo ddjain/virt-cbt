@@ -75,13 +75,13 @@ pod="${BACKUP}-evidence"
 cleanup() { oc delete pod "$pod" -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
-image=$(oc get pods -n "$NAMESPACE" -o json 2>/dev/null | jq -er --arg prefix "virt-launcher-$VM-" \
-  '[.items[] | select(.metadata.name | startswith($prefix)) | .spec.containers[] | select(.name=="compute") | .image][0]' 2>/dev/null) || true
-if [[ -z ${image:-} ]]; then
-  image=$(oc get pods -n "$NAMESPACE" -o json 2>/dev/null | jq -er \
-    '[.items[] | select(.metadata.name | startswith("virt-launcher-")) | .spec.containers[] | select(.name=="compute") | .image][0]' 2>/dev/null) || true
+image=$(oc get pods -n "$NAMESPACE" -o json 2>/dev/null | jq -r --arg prefix "virt-launcher-$VM-" \
+  '([.items[] | select(.metadata.name | startswith($prefix)) | .spec.containers[] | select(.name=="compute") | .image][0] // empty)' 2>/dev/null) || true
+if [[ -z ${image:-} || $image == null ]]; then
+  image=$(oc get pods -n "$NAMESPACE" -o json 2>/dev/null | jq -r \
+    '([.items[] | select(.metadata.name | startswith("virt-launcher-")) | .spec.containers[] | select(.name=="compute") | .image][0] // empty)' 2>/dev/null) || true
 fi
-[[ -n ${image:-} ]] || emit_inconclusive "no virt-launcher pod in namespace $NAMESPACE to source a qemu-img-capable image"
+[[ -n ${image:-} && $image != null ]] || emit_inconclusive "no virt-launcher pod in namespace $NAMESPACE to source a qemu-img-capable image"
 
 # Keep the inspector off the VM's current node: attaching the backup PVC on
 # the same node the VM's disks are already mapped on is what triggered a

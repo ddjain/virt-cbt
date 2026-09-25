@@ -117,6 +117,7 @@ Avoid sleep-only timing as the sole sync mechanism.
 **Engine policy:** prefer **`krknctl`**. Use native **`oc` / `kubectl`** only when
 krknctl is awkward or cannot express the fault cleanly.
 
-**Future helper:** each scenario directory will contain its own
+**Helper:** each scenario directory contains (or gets) its own
 `chaos-trigger.sh` next to `scenario_spec.md` (not a shared script under
-`scripts/`). That keeps inject logic reproducible and local to the scenario.
+`scripts/`). Generate/run via the `cbt-chaos-test` skill
+(`.claude/skills/cbt-chaos-test/`) — e.g. `cbt-chaos-test cbt-01`.
