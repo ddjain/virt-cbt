@@ -119,6 +119,13 @@ make backup VMS=fedora-cbt-1
    = genuinely Full). The inspector pod is deleted immediately after and
    deliberately scheduled away from the VM's own node.
 
+`make backup`, `make cbt-backup`, `make verify`, and `make cbt-evidence`
+return **INCONCLUSIVE** after their control-plane/header checks. They do not
+claim recoverability: use `make cbt-cycle` for a PASS, because it restores the
+Full+Incremental chain into a new VM and compares the post-append marker hash.
+Every new VMB carries a per-run test identity and source-VM UID annotation;
+the checker rejects a mismatched VMB UID or test identity.
+
 Selection flags (used by `backup`, `cbt-backup`, `verify`, `status`,
 `cbt-evidence`, `discover-vms`): exactly one of `VMS=a,b`, `N=2` (first N by
 natural/version name order, so `fedora-cbt-2` precedes `fedora-cbt-10`),
@@ -158,13 +165,11 @@ SHA-256 digests).
 make cbt-evidence VMS=fedora-cbt-1
 ```
 
-Runs *only* the physical qcow2-header check from steps 3/4 against whatever
-`<vm>-full`/`<vm>-incremental` backups already exist — without taking new
-backups. This is the one you re-run **after injecting chaos** (killing
-virt-launcher, virt-handler, a ceph OSD, partitioning the network, etc.) to
-ask "is the backup that resulted still genuinely correct?", independent of
-whatever the chaos did to `VirtualMachineBackup.status` or the controller's
-logs.
+Runs only the physical qcow2-header check from steps 3/4 against existing
+`<vm>-full`/`<vm>-incremental` backups. It is useful forensic evidence after
+chaos, but is deliberately reported as **INCONCLUSIVE**, never backup
+success: a header cannot prove payload recovery. A failed VMB is never
+classified as a successful backup, even if an artifact header is readable.
 
 ### 7. Look at results
 
@@ -183,7 +188,8 @@ For `backup` / `cbt-backup` (and ad-hoc `make cbt-diagnostics`), each run
 also writes a forensic bundle under
 `diagnostics/<vm>/<backup-name>/` — CR YAML, filtered events, and
 virt-controller / virt-handler / virt-launcher logs for the backup window.
-This is for post-mortem analysis only; pass/fail stays on the qcow2 evidence.
+This is post-mortem context only. `cbt-cycle` / `cbt-restore-proof` are the
+only commands that report backup success because they prove restoreability.
 Disable with `CBT_DIAGNOSTICS=0`; set `CBT_DIAGNOSTICS_DEPTH=storage` to also
 capture CSI node logs and StorageCluster/CephCluster status.
 

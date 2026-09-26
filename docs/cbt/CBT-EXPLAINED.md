@@ -496,18 +496,22 @@ Two things worth calling out about *why* this simple check is enough:
                                 a storage OSD / partition the network /
                                 reboot the node
   4. take an Incremental backup (§4), during or right after the chaos
-  5. VALIDATE — read the Incremental qcow2's header (§7) at any point
-     afterward, independent of whether the chaos already ended:
-       → PASS/FAIL decided by reading the backup qcow2's own header,
-         never VirtualMachineBackup.status or controller logs
-  6. record the result, repeat with different chaos scenarios
+  5. INSPECT — read the Incremental qcow2 header (§7) after chaos:
+       → artifact-shape evidence only; never call this backup success
+  6. RESTORE — rebuild the Full+Incremental chain and compare a content hash:
+       → this is the PASS/FAIL recovery gate
+  7. record both the artifact finding and restore outcome, repeat with
+     different chaos scenarios
 ```
 
-The evidence check in step 5 is deliberately separable from steps 2/4: you
-can run it inline right after each backup, and you can also re-run it
-standalone later, against backups that already exist, without redoing
-anything — which is exactly the shape a chaos experiment needs ("inject
-chaos, then verify what actually happened, without disturbing it further").
+The header check in step 5 is deliberately separable from backup creation:
+you can re-run it against existing artifacts without disturbing a VM. It is
+not a restore proof. A header says that a qcow2 is Full-shaped or
+CBT-Incremental-shaped; it cannot establish that every expected byte is
+recoverable. The validator therefore reports standalone header checks as
+**INCONCLUSIVE** and reserves `PASS` for `cbt-cycle` /
+`cbt-restore-proof`, which boot a restored chain and compare the post-mutation
+marker hash.
 
 For post-mortem analysis of *why* a backup behaved a certain way (controller
 fallback, attach failures, handler crashes), `make backup` / `make cbt-backup`
