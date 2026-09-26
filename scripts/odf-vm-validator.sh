@@ -161,14 +161,23 @@ assert_owned_vm() {
 }
 acquire_vm_lock() {
   local vm=$1 lock="${vm}-cbt-lock"
-  oc create configmap "$lock" -n "$NAMESPACE" \
-    --from-literal=test-id="$test_id" \
-    --from-literal=owner="$$" \
-    --labels=app.kubernetes.io/name=odf-cbt-validator,app.kubernetes.io/managed-by=odf-cbt-validator \
-    >/dev/null || {
-      echo "ERROR: VM/$vm is already locked by another validator run ($lock)" >&2
-      return 1
-    }
+  if ! oc create -f - >/dev/null <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: $lock
+  namespace: $NAMESPACE
+  labels:
+    app.kubernetes.io/name: odf-cbt-validator
+    app.kubernetes.io/managed-by: odf-cbt-validator
+data:
+  test-id: "$test_id"
+  owner: "$$"
+EOF
+  then
+    echo "ERROR: VM/$vm is already locked by another validator run ($lock)" >&2
+    return 1
+  fi
 }
 release_vm_lock() {
   local vm=$1 lock="${vm}-cbt-lock"
@@ -889,7 +898,7 @@ r = c.execute('select seq, payload, digest from records order by seq').fetchall(
 assert r and [x[0] for x in r] == list(range(1, len(r) + 1))
 assert all(hashlib.sha256(x[1].encode()).hexdigest() == x[2] for x in r)
 print('GUEST_SEQ=' + str(r[-1][0]))
-\")") || return 1
+  \"") || return 1
   max_seq=$(grep -Eo 'GUEST_SEQ=[0-9]+' <<<"$output" | tail -1 | cut -d= -f2)
   [[ $max_seq =~ ^[1-9][0-9]*$ ]] || return 1
   printf '%s\n' "$max_seq"
