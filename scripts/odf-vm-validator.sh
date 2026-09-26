@@ -239,12 +239,25 @@ proof_manifest_read() {
   [[ -r $path ]] || { echo "ERROR: no proof manifest for $vm at $path; run make backup first" >&2; return 1; }
   jq -e . "$path"
 }
+ensure_proof_marker() {
+  local vm=$1 created_at payload output
+  created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  payload=$(printf 'format=odf-cbt-proof-v1\nguest_created_at=%s\n' "$created_at" | base64 | tr -d '\n')
+  output=$(proof_guest_command "$vm" "sudo -n sh -c 'mountpoint -q /data && mkdir -p /data/vm-validator && if test -e $CBT_PROOF_PATH; then test -f $CBT_PROOF_PATH; else tmp=\$(mktemp /data/vm-validator/.cbt-proof.XXXXXX) || exit 1; if printf %s \"$payload\" | base64 -d > \"\$tmp\" && sync -f \"\$tmp\" && ln \"\$tmp\" $CBT_PROOF_PATH 2>/dev/null; then rm -f \"\$tmp\"; printf \"%s\\n\" CBT_PROOF_INITIALIZED; else rc=\$?; rm -f \"\$tmp\"; test -f $CBT_PROOF_PATH || exit \"\$rc\"; fi; fi'") || {
+    echo "ERROR: could not initialize recovery proof file at $CBT_PROOF_PATH on $vm" >&2
+    return 1
+  }
+  if [[ $output == *CBT_PROOF_INITIALIZED* ]]; then
+    log INFO PROOF "Initialized missing recovery proof file at $CBT_PROOF_PATH on $vm"
+  fi
+}
 proof_marker_metadata() {
-  local vm=$1 output sha created
-  output=$(guest_ssh "$vm" "sudo -n sh -c 'mountpoint -q /data && test -f $CBT_PROOF_PATH && sha256sum $CBT_PROOF_PATH && grep ^guest_created_at= $CBT_PROOF_PATH | cut -d= -f2- | head -n 1'") || return
+  local vm=$1 output sha format created
+  output=$(guest_ssh "$vm" "sudo -n sh -c 'mountpoint -q /data && test -f $CBT_PROOF_PATH && sha256sum $CBT_PROOF_PATH && sed -n 1p $CBT_PROOF_PATH && grep ^guest_created_at= $CBT_PROOF_PATH | cut -d= -f2- | head -n 1'") || return
   sha=$(awk 'NR == 1 {print $1; exit}' <<<"$output")
-  created=$(sed -n '2p' <<<"$output")
-  [[ $sha =~ ^[0-9a-f]{64}$ && -n $created ]] || {
+  format=$(sed -n '2p' <<<"$output")
+  created=$(sed -n '3p' <<<"$output")
+  [[ $sha =~ ^[0-9a-f]{64}$ && $format == format=odf-cbt-proof-v1 && -n $created ]] || {
     echo "ERROR: could not read proof marker metadata from $CBT_PROOF_PATH on $vm" >&2
     return 1
   }
@@ -727,6 +740,7 @@ proof_backup_one() {
     echo "ERROR: active proof manifest already exists for $vm; run make backup-reset first" >&2
     return 1
   fi
+  ensure_proof_marker "$vm" || return
   baseline_sha=$(proof_marker_append "$vm" "$proof_id" baseline) || return
   marker_json=$(proof_marker_metadata "$vm") || return
   [[ $(jq -r '.sha256' <<<"$marker_json") == "$baseline_sha" ]] || {

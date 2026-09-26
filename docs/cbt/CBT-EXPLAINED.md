@@ -379,11 +379,12 @@ to own retention, transport, encryption, and restore.
 This repo implements three online-safe restore acceptance paths:
 
 - **`make verify-cbt`** proves a normal density-pool sequence. `make backup`
-  records a baseline SHA-256 for `/data/vm-validator/hello.txt` in a
-  host-side proof manifest, `make cbt-backup` appends a unique record and
-  saves the post-append hash, then `make verify-cbt` binds that manifest to
-  the exact VM/PVC/VMB UIDs, restores the existing artifacts, and requires the
-  restored file hash to match.
+  atomically initializes `/data/vm-validator/hello.txt` if a legacy pool lacks
+  the cloud-init seed, then records a baseline SHA-256 in a host-side proof
+  manifest. `make cbt-backup` appends a unique record and saves the
+  post-append hash, then `make verify-cbt` binds that manifest to the exact
+  VM/PVC/VMB UIDs, restores the existing artifacts, and requires the restored
+  file hash to match.
 - **`make cbt-cycle`** and **`make cbt-restore-proof`** create their own
   marker/write sequence in the density pool or a disposable namespace.
 

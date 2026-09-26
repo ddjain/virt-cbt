@@ -88,10 +88,11 @@ VM pool already exists in it (run `make density-teardown` first). Renders
 `<VM_PREFIX>-1` .. `<VM_PREFIX>-N` (default prefix `fedora-cbt`), each with
 its own `<vm>-data` PVC, `<vm>-backup-output` PVC, and CBT enabled on the
 data disk. Cloud-init mounts `/data`, starts the SQLite workload and fio
-stress services, and creates `/data/vm-validator/cbt-marker.bin`
+stress services, and seeds `/data/vm-validator/cbt-marker.bin`
 (`RESTORE_PROOF_BASE_MIB`) plus `/data/vm-validator/hello.txt`. The latter
 records its guest creation time and is the small, dedicated recovery-proof
-file used by the normal Full → Incremental → restore flow. Setup then polls
+file used by the normal Full → Incremental → restore flow.
+Setup then polls
 until all VMs report `status.ready=true` and
 `status.changedBlockTracking.state=Enabled` (up to `STABILIZE_TIMEOUT`
 seconds).
@@ -107,9 +108,12 @@ make density-status SUMMARY=1    # {count, ready, cbtEnabled} JSON summary
 make backup VMS=fedora-cbt-1
 ```
 
-`backup` first confirms the live guest workload is healthy, then appends a
-unique baseline record to `/data/vm-validator/hello.txt`, flushes it, and
-hashes the complete file. It writes a durable host-side proof manifest at:
+`backup` first confirms the live guest workload is healthy, then ensures the
+dedicated proof file exists on the mounted data disk. For a legacy pool that
+predates the cloud-init seed, it atomically initializes the missing file and
+logs that action; it never falls back to the container disk. It then appends a
+unique baseline record, flushes it, and hashes the complete file. It writes a
+durable host-side proof manifest at:
 
 ```text
 reports/proofs/fedora-cbt-1.json

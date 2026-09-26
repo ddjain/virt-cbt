@@ -22,7 +22,7 @@ Full/Incremental, `verify`, and standalone `cbt-evidence` reports are **INCONCLU
 
 The fresh-pool Full backup logged a virtctl client/server mismatch (client v1.7.0, server v1.8.4) and one guest SSH probe returned `exit status 3`. The command retried, then the Full VMB reached `Done` and the qcow2 header check matched Full. No subsequent backup or restore verification failed.
 
-### Finding: existing pool predates the `hello.txt` proof-file setup
+### Resolved finding: existing pool predates the `hello.txt` proof-file setup
 
 The persistent `make backup` path failed on the pre-existing VM in `cbt-gcp-20260923` after `backup-reset` completed. The VM/VMI were healthy, CBT was Enabled, and the backup PVC was Bound. The guest directory `/data/vm-validator` contained `cbt-marker.bin`, `workload.db`, `workload.db-journal`, and `workload.log`, but no `hello.txt`. Independent `oc` showed no lock, VMB, or tracker checkpoint at the time of the failed attempt. The LLM judge classified this as a missing guest proof-file precondition, not a cluster/VM failure.
 
@@ -63,9 +63,9 @@ total 672852
 real 3.23
 ```
 
-A fresh VM created by the latest template completed the persistent backup/restore workflow. The old VM was not modified to synthesize `hello.txt`. After the failure, `cbt-cycle` successfully recreated and verified a Full/Incremental pair in the original namespace, so it was not left without backups.
+A fresh VM created by the latest template completed the persistent backup/restore workflow. The old VM was not modified during the retest to synthesize `hello.txt`. After the failure, `cbt-cycle` successfully recreated and verified a Full/Incremental pair in the original namespace, so it was not left without backups.
 
-**Disposition:** Existing pools created before the proof-file cloud-init setup need that guest file before using the persistent `backup`/`cbt-backup` flow. This retest did not change guest data or validator code to hide that precondition.
+**Resolution:** `make backup` now atomically initializes the dedicated proof file on the mounted `/data` disk when a legacy pool lacks the cloud-init seed, logs that action, and never falls back to the container disk or mounts a source PVC from another pod.
 
 ### LLM judge clarification
 
