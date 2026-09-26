@@ -5,7 +5,25 @@ CONFIG=${CONFIG:-$ROOT/config.env}
 COMMAND=help
 ARGS=()
 while (($#)); do case "$1" in --config) CONFIG=${2:?missing config}; shift 2;; -h|--help) COMMAND=help; shift;; *) COMMAND=$1; shift; ARGS+=("$@"); break;; esac; done
-[[ -r "$CONFIG" ]] && source "$CONFIG"
+CONFIG_LOADED=0
+load_config() {
+  local line key value
+  [[ -r $CONFIG ]] || return 0
+  while IFS= read -r line || [[ -n $line ]]; do
+    case "$line" in ''|\#*) continue;; esac
+    [[ $line == *=* ]] || { echo "ERROR: invalid config line in $CONFIG: $line" >&2; return 2; }
+    key=${line%%=*}
+    value=${line#*=}
+    case "$key" in
+      KUBECONFIG|NAMESPACE|VM_COUNT|VM_PREFIX|VM_LABEL_SELECTOR|CONTAINER_IMAGE|VM_CPU|VM_MEMORY|DATA_SIZE|BACKUP_SIZE|DATA_STORAGE_CLASS|BACKUP_STORAGE_CLASS|TARGET_NODE|SSH_KEY|SSH_PUBLIC_KEY|SSH_USER|TIMEOUT|STABILIZE_TIMEOUT|CBT_CHANGE_WAIT|REPORTS_DIR|RESTORE_PROOF_BASE_MIB|RESTORE_PROOF_APPEND_MIB|CBT_DIAGNOSTICS|CBT_DIAGNOSTICS_DEPTH) ;;
+      BACKUP_CONCURRENCY) echo "WARNING: BACKUP_CONCURRENCY is obsolete and ignored; remove it from $CONFIG" >&2 ;;
+      *) echo "ERROR: unsupported config key in $CONFIG: $key" >&2; return 2;;
+    esac
+    printf -v "$key" '%s' "$value"
+  done <"$CONFIG"
+  CONFIG_LOADED=1
+}
+load_config || exit $?
 : "${NAMESPACE:=cbt-demo}"; : "${VM_COUNT:=1}"; : "${VM_PREFIX:=fedora-cbt}"; : "${VM_LABEL_SELECTOR:=app.kubernetes.io/name=odf-cbt-validator}"
 : "${CONTAINER_IMAGE:=quay.io/containerdisks/fedora:41}"; : "${VM_CPU:=1}"; : "${VM_MEMORY:=1Gi}"; : "${DATA_SIZE:=10Gi}"; : "${BACKUP_SIZE:=20Gi}"
 : "${DATA_STORAGE_CLASS:=ocs-storagecluster-ceph-rbd}"; : "${BACKUP_STORAGE_CLASS:=$DATA_STORAGE_CLASS}"; : "${TARGET_NODE:=}"
@@ -17,7 +35,7 @@ if [[ -z $SSH_PUBLIC_KEY && -n $SSH_KEY && -r $SSH_KEY.pub ]]; then SSH_PUBLIC_K
 
 usage() { cat <<'EOF'
 Usage: odf-vm-validator.sh [--config FILE] COMMAND [options]
-Commands: generate-keys check-prereqs density-setup density-status density-teardown[--all] discover-vms backup cbt-backup backup-reset cbt-cycle cbt-payload-proof cbt-restore-proof cbt-evidence cbt-diagnostics verify status ssh report list-reports e2e
+Commands: generate-keys check-prereqs density-setup density-status density-teardown[--all] discover-vms backup cbt-backup verify-cbt backup-reset cbt-cycle cbt-payload-proof cbt-restore-proof cbt-evidence cbt-diagnostics verify status ssh report list-reports e2e
 Selection options: --vms CSV | --count N | --selector key=value | --all
 EOF
 }
@@ -26,18 +44,30 @@ log() {
   local level=$1 phase=$2; shift 2
   printf '[%s] [%s] [%s] %s\n' "$(date -u +%H:%M:%S)" "$level" "$phase" "$*"
 }
-run_id=''; run_dir=''; report_command=''; selected=(); passed=0; failed=0; inconclusive=0
+require_runtime_config() {
+  [[ ${BASH_VERSINFO[0]} -ge 4 ]] || { echo 'ERROR: bash 4+ is required' >&2; return 2; }
+  [[ $CONFIG_LOADED == 1 ]] || { echo "ERROR: configuration file is required for cluster operations: $CONFIG" >&2; return 2; }
+  [[ -n $KUBECONFIG && -r $KUBECONFIG ]] || { echo "ERROR: KUBECONFIG must name a readable file in $CONFIG" >&2; return 2; }
+  [[ $TIMEOUT =~ ^[1-9][0-9]*$ && $STABILIZE_TIMEOUT =~ ^[1-9][0-9]*$ && $CBT_CHANGE_WAIT =~ ^[0-9]+$ ]] || {
+    echo 'ERROR: TIMEOUT and STABILIZE_TIMEOUT must be positive integers; CBT_CHANGE_WAIT must be non-negative' >&2
+    return 2
+  }
+}
+run_id=''; test_id=''; run_dir=''; report_command=''; selected=(); passed=0; failed=0; inconclusive=0
+CBT_PROOF_PATH=/data/vm-validator/hello.txt
+PROOF_SCHEMA_VERSION=1
 start_report() {
   local cmd=$1
   report_command=$cmd
-  run_id="run-$(date -u +%Y%m%dT%H%M%SZ)-$cmd"
+  test_id="cbt-$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM"
+  run_id="run-${test_id}-$cmd"
   run_dir="$REPORTS_DIR/$run_id"
-  mkdir -p "$run_dir/per-vm" "$run_dir/diagnostics"
-  : >"$run_dir/run.log"
+  mkdir -p "$run_dir/per-vm" "$run_dir/diagnostics" || return
+  : >"$run_dir/run.log" || return
   exec > >(tee -a "$run_dir/run.log") 2>&1
   started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   passed=0; failed=0; inconclusive=0
-  log INFO REPORT "Started $run_id"
+  log INFO REPORT "Started $run_id (test-id=$test_id)"
 }
 write_summary_txt() {
   local status=$1
@@ -98,6 +128,7 @@ parse_selection() {
   (( sel_rc == 0 )) || return "$sel_rc"
   while IFS= read -r x; do [[ -n $x ]] && selected+=("$x"); done <<<"$sel_out"
   ((${#selected[@]})) || { echo 'ERROR: selection matched no managed VMs' >&2; return 1; }
+  for x in "${selected[@]}"; do assert_owned_vm "$x" || return; done
 }
 record() {
   local vm=$1 status=$2 message=$3
@@ -117,6 +148,41 @@ assert_owned_namespace() {
     echo "ERROR: refusing unowned namespace $NAMESPACE (managed-by='$owned')" >&2
     return 1
   }
+}
+assert_owned_vm() {
+  local vm=$1
+  oc get vm "$vm" -n "$NAMESPACE" -o json |
+    jq -e '
+      .metadata.labels["app.kubernetes.io/name"] == "odf-cbt-validator" and
+      .metadata.labels["app.kubernetes.io/managed-by"] == "kube-burner"
+    ' >/dev/null || {
+      echo "ERROR: refusing VM/$vm because it is not kube-burner-managed by this validator" >&2
+      return 1
+    }
+}
+acquire_vm_lock() {
+  local vm=$1 lock="${vm}-cbt-lock"
+  if ! oc create -f - >/dev/null <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: $lock
+  namespace: $NAMESPACE
+  labels:
+    app.kubernetes.io/name: odf-cbt-validator
+    app.kubernetes.io/managed-by: odf-cbt-validator
+data:
+  test-id: "$test_id"
+  owner: "$$"
+EOF
+  then
+    echo "ERROR: VM/$vm is already locked by another validator run ($lock)" >&2
+    return 1
+  fi
+}
+release_vm_lock() {
+  local vm=$1 lock="${vm}-cbt-lock"
+  oc delete configmap "$lock" -n "$NAMESPACE" --ignore-not-found --wait=true --timeout="${TIMEOUT}s" >/dev/null
 }
 virt_launcher_image() {
   # Prefer the named VM's virt-launcher compute image; fall back to any
@@ -165,6 +231,202 @@ guest_ssh() {
     "$SSH_USER@vm/$vm" --command "${command:-hostname}" || rc=$?
   rm -f "$kh"
   return "$rc"
+}
+proof_manifest_path() { printf '%s/proofs/%s.json' "$REPORTS_DIR" "$1"; }
+proof_manifest_read() {
+  local vm=$1 path
+  path=$(proof_manifest_path "$vm")
+  [[ -r $path ]] || { echo "ERROR: no proof manifest for $vm at $path; run make backup first" >&2; return 1; }
+  jq -e . "$path"
+}
+ensure_proof_marker() {
+  local vm=$1 created_at payload output
+  created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  payload=$(printf 'format=odf-cbt-proof-v1\nguest_created_at=%s\n' "$created_at" | base64 | tr -d '\n')
+  output=$(proof_guest_command "$vm" "sudo -n sh -c 'mountpoint -q /data && mkdir -p /data/vm-validator && if test -e $CBT_PROOF_PATH; then test -f $CBT_PROOF_PATH; else tmp=\$(mktemp /data/vm-validator/.cbt-proof.XXXXXX) || exit 1; if printf %s \"$payload\" | base64 -d > \"\$tmp\" && sync -f \"\$tmp\" && ln \"\$tmp\" $CBT_PROOF_PATH 2>/dev/null; then rm -f \"\$tmp\"; printf \"%s\\n\" CBT_PROOF_INITIALIZED; else rc=\$?; rm -f \"\$tmp\"; test -f $CBT_PROOF_PATH || exit \"\$rc\"; fi; fi'") || {
+    echo "ERROR: could not initialize recovery proof file at $CBT_PROOF_PATH on $vm" >&2
+    return 1
+  }
+  if [[ $output == *CBT_PROOF_INITIALIZED* ]]; then
+    log INFO PROOF "Initialized missing recovery proof file at $CBT_PROOF_PATH on $vm"
+  fi
+}
+proof_marker_metadata() {
+  local vm=$1 output sha format created
+  output=$(guest_ssh "$vm" "sudo -n sh -c 'mountpoint -q /data && test -f $CBT_PROOF_PATH && sha256sum $CBT_PROOF_PATH && sed -n 1p $CBT_PROOF_PATH && grep ^guest_created_at= $CBT_PROOF_PATH | cut -d= -f2- | head -n 1'") || return
+  sha=$(awk 'NR == 1 {print $1; exit}' <<<"$output")
+  format=$(sed -n '2p' <<<"$output")
+  created=$(sed -n '3p' <<<"$output")
+  [[ $sha =~ ^[0-9a-f]{64}$ && $format == format=odf-cbt-proof-v1 && -n $created ]] || {
+    echo "ERROR: could not read proof marker metadata from $CBT_PROOF_PATH on $vm" >&2
+    return 1
+  }
+  jq -n --arg path "$CBT_PROOF_PATH" --arg sha "$sha" --arg created "$created" \
+    '{path:$path,sha256:$sha,createdAt:$created}'
+}
+proof_marker_append() {
+  local vm=$1 proof_id=$2 stage=$3 now body payload output sha
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  body=$(printf 'proof_id=%s\nstage=%s\nrecorded_at=%s\n' "$proof_id" "$stage" "$now")
+  payload=$(printf '%s' "$body" | base64 | tr -d '\n')
+  output=$(guest_ssh "$vm" "sudo -n sh -c 'mountpoint -q /data && test -f $CBT_PROOF_PATH && printf %s \"$payload\" | base64 -d >> $CBT_PROOF_PATH && sync -f $CBT_PROOF_PATH && sha256sum $CBT_PROOF_PATH'") || return
+  sha=$(awk 'NR == 1 {print $1; exit}' <<<"$output")
+  [[ $sha =~ ^[0-9a-f]{64}$ ]] || {
+    echo "ERROR: failed to append and hash $CBT_PROOF_PATH on $vm" >&2
+    return 1
+  }
+  printf '%s\n' "$sha"
+}
+proof_manifest_create() {
+  local vm=$1 proof_id=$2 marker_json=$3 path tmp vm_uid vm_created pvc_uid marker_path marker_created baseline now
+  path=$(proof_manifest_path "$vm")
+  if [[ -e $path ]] && ! jq -e '.state == "invalidated"' "$path" >/dev/null 2>&1; then
+    echo "ERROR: active proof manifest already exists for $vm; run make backup-reset first" >&2
+    return 1
+  fi
+  vm_uid=$(oc get vm "$vm" -n "$NAMESPACE" -o jsonpath='{.metadata.uid}') || return
+  vm_created=$(oc get vm "$vm" -n "$NAMESPACE" -o jsonpath='{.metadata.creationTimestamp}') || return
+  pvc_uid=$(oc get pvc "$vm-backup-output" -n "$NAMESPACE" -o jsonpath='{.metadata.uid}') || return
+  marker_path=$(jq -er '.path' <<<"$marker_json") || return
+  marker_created=$(jq -er '.createdAt' <<<"$marker_json") || return
+  baseline=$(jq -er '.sha256' <<<"$marker_json") || return
+  mkdir -p "$(dirname "$path")" || return
+  tmp=$(mktemp "${path}.XXXXXX") || return
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  if ! jq -n \
+    --argjson schema "$PROOF_SCHEMA_VERSION" \
+    --arg proof "$proof_id" --arg ns "$NAMESPACE" \
+    --arg vm "$vm" --arg vm_uid "$vm_uid" --arg vm_created "$vm_created" \
+    --arg pvc "$vm-backup-output" --arg pvc_uid "$pvc_uid" \
+    --arg path "$marker_path" --arg marker_created "$marker_created" --arg baseline "$baseline" \
+    --arg full "$vm-full" --arg full_test "$test_id" --arg now "$now" \
+    '{schemaVersion:$schema,proofId:$proof,namespace:$ns,vm:{name:$vm,uid:$vm_uid,createdAt:$vm_created},backupOutput:{name:$pvc,uid:$pvc_uid},marker:{path:$path,createdAt:$marker_created,baselineSha256:$baseline},full:{name:$full,uid:null,testId:$full_test},incremental:null,state:"baseline-recorded",createdAt:$now,updatedAt:$now}' \
+    >"$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv -f "$tmp" "$path"
+}
+proof_manifest_record_full_request() {
+  local vm=$1 proof_id=$2 uid=$3 path tmp now
+  path=$(proof_manifest_path "$vm")
+  tmp=$(mktemp "${path}.XXXXXX") || return
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  if ! jq -e --arg proof "$proof_id" --arg uid "$uid" --arg now "$now" '
+    select(.proofId == $proof and .state == "baseline-recorded") |
+    .full.uid = $uid | .state = "full-requested" | .updatedAt = $now
+  ' "$path" >"$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv -f "$tmp" "$path"
+}
+proof_manifest_record_incremental() {
+  local vm=$1 proof_id=$2 expected_hash=$3 path tmp now
+  path=$(proof_manifest_path "$vm")
+  tmp=$(mktemp "${path}.XXXXXX") || return
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  if ! jq -e --arg proof "$proof_id" --arg name "$vm-incremental" \
+    --arg test "$test_id" --arg hash "$expected_hash" --arg now "$now" '
+    select(.proofId == $proof and .state == "full-complete") |
+    .incremental = {name:$name,uid:null,testId:$test,expectedRestoreSha256:$hash,recordedAt:$now} |
+    .state = "incremental-recorded" | .updatedAt = $now
+  ' "$path" >"$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv -f "$tmp" "$path"
+}
+proof_manifest_record_incremental_request() {
+  local vm=$1 proof_id=$2 uid=$3 path tmp now
+  path=$(proof_manifest_path "$vm")
+  tmp=$(mktemp "${path}.XXXXXX") || return
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  if ! jq -e --arg proof "$proof_id" --arg uid "$uid" --arg now "$now" '
+    select(.proofId == $proof and .state == "incremental-recorded") |
+    .incremental.uid = $uid | .state = "incremental-requested" | .updatedAt = $now
+  ' "$path" >"$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv -f "$tmp" "$path"
+}
+proof_manifest_set_state() {
+  local vm=$1 proof_id=$2 expected_state=$3 new_state=$4 path tmp now
+  path=$(proof_manifest_path "$vm")
+  tmp=$(mktemp "${path}.XXXXXX") || return
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  if ! jq -e --arg proof "$proof_id" --arg expected "$expected_state" --arg new "$new_state" --arg now "$now" '
+    select(.proofId == $proof and .state == $expected) |
+    .state = $new | .updatedAt = $now
+  ' "$path" >"$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv -f "$tmp" "$path"
+}
+proof_manifest_for_vm() {
+  local vm=$1 manifest vm_uid pvc_uid
+  manifest=$(proof_manifest_read "$vm") || return
+  vm_uid=$(oc get vm "$vm" -n "$NAMESPACE" -o jsonpath='{.metadata.uid}') || return
+  pvc_uid=$(oc get pvc "$vm-backup-output" -n "$NAMESPACE" -o jsonpath='{.metadata.uid}') || return
+  jq -e --argjson schema "$PROOF_SCHEMA_VERSION" --arg ns "$NAMESPACE" \
+    --arg vm "$vm" --arg vm_uid "$vm_uid" --arg pvc "$vm-backup-output" --arg pvc_uid "$pvc_uid" '
+    select(
+      .schemaVersion == $schema and .namespace == $ns and
+      .vm.name == $vm and .vm.uid == $vm_uid and
+      .backupOutput.name == $pvc and .backupOutput.uid == $pvc_uid
+    )
+  ' <<<"$manifest" || {
+    echo "ERROR: proof manifest for $vm does not match the current VM or backup PVC" >&2
+    return 1
+  }
+}
+assert_proof_vmb() {
+  local vm=$1 name=$2 uid=$3 expected_test=$4 proof_id=$5 expected_hash=$6 vm_uid
+  vm_uid=$(oc get vm "$vm" -n "$NAMESPACE" -o jsonpath='{.metadata.uid}') || return
+  oc get virtualmachinebackup "$name" -n "$NAMESPACE" -o json |
+    jq -e --arg vm "$vm" --arg uid "$uid" --arg test "$expected_test" \
+      --arg proof "$proof_id" --arg hash "$expected_hash" --arg vm_uid "$vm_uid" '
+      .metadata.uid == $uid and
+      .metadata.labels["odf-cbt-validator/test-id"] == $test and
+      .metadata.annotations["odf-cbt-validator/source-vm-uid"] == $vm_uid and
+      .metadata.annotations["odf-cbt-validator/proof-id"] == $proof and
+      .metadata.annotations["odf-cbt-validator/marker-sha256"] == $hash and
+      .spec.source.apiGroup == "backup.kubevirt.io" and
+      .spec.source.kind == "VirtualMachineBackupTracker" and
+      .spec.source.name == ($vm + "-tracker") and
+      .spec.mode == "Push" and .spec.pvcName == ($vm + "-backup-output")
+    ' >/dev/null || {
+      echo "ERROR: VirtualMachineBackup/$name does not match its proof manifest" >&2
+      return 1
+    }
+}
+proof_manifest_mark_verified() {
+  local vm=$1 proof_id=$2 restored_hash=$3 path tmp now
+  path=$(proof_manifest_path "$vm")
+  tmp=$(mktemp "${path}.XXXXXX") || return
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  if ! jq -e --arg proof "$proof_id" --arg hash "$restored_hash" --arg now "$now" '
+    select(.proofId == $proof and (.state == "incremental-complete" or .state == "verified")) |
+    .state = "verified" | .verification = {restoredSha256:$hash,verifiedAt:$now} | .updatedAt = $now
+  ' "$path" >"$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv -f "$tmp" "$path"
+}
+proof_manifest_invalidate() {
+  local vm=$1 path tmp now
+  path=$(proof_manifest_path "$vm")
+  [[ -e $path ]] || return 0
+  tmp=$(mktemp "${path}.XXXXXX") || return
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  if ! jq -e --arg now "$now" '.state = "invalidated" | .invalidatedAt = $now | .updatedAt = $now' "$path" >"$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv -f "$tmp" "$path"
 }
 check_prereqs() {
   for t in oc virtctl kube-burner jq; do need "$t" || return; done
@@ -351,72 +613,182 @@ write_backup_baseline() {
   fi
   return 0
 }
-backup_one() {
-  local vm=$1 name=$2 tracker="$vm-tracker" pvc="$vm-backup-output"
-  local checkpoint t0 baseline wait_rc=0
-  assert_owned_namespace || return 1
-  checkpoint=$(tracker_checkpoint_name "$tracker")
-  [[ -z $checkpoint ]] || { echo "full backup already exists for $vm; use cbt-backup or recreate density"; return 1; }
-  oc delete virtualmachinebackup "$name" -n "$NAMESPACE" --ignore-not-found --wait=true --timeout="${TIMEOUT}s"
-  t0=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  baseline=$(mktemp)
-  write_backup_baseline "$vm" "$tracker" "$baseline"
-  cat <<EOF | oc apply -f -
+assert_backup_inputs() {
+  local vm=$1 tracker="$vm-tracker" pvc="$vm-backup-output"
+  assert_owned_namespace || return
+  assert_owned_vm "$vm" || return
+  oc get virtualmachinebackuptracker "$tracker" -n "$NAMESPACE" -o json |
+    jq -e --arg vm "$vm" '
+      .metadata.labels["app.kubernetes.io/name"] == "odf-cbt-validator" and
+      .metadata.labels["app.kubernetes.io/managed-by"] == "kube-burner" and
+      .spec.source.apiGroup == "kubevirt.io" and
+      .spec.source.kind == "VirtualMachine" and
+      .spec.source.name == $vm
+    ' >/dev/null || { echo "ERROR: tracker/$tracker is not the expected managed source for $vm" >&2; return 1; }
+  oc get pvc "$pvc" -n "$NAMESPACE" -o json |
+    jq -e '
+      .metadata.labels["app.kubernetes.io/name"] == "odf-cbt-validator" and
+      .metadata.labels["app.kubernetes.io/managed-by"] == "kube-burner" and
+      .status.phase == "Bound"
+    ' >/dev/null || { echo "ERROR: PVC/$pvc is not the expected managed Bound backup target" >&2; return 1; }
+}
+create_backup_request() {
+  local vm=$1 name=$2 force_full=${3:-false} proof_id=${4:-} marker_sha=${5:-}
+  local tracker="$vm-tracker" pvc="$vm-backup-output" uid force_full_yaml='' proof_annotations=''
+  [[ -n $test_id ]] || { echo 'ERROR: backup requests require an active test report' >&2; return 1; }
+  if [[ -n $proof_id || -n $marker_sha ]]; then
+    [[ -n $proof_id && $marker_sha =~ ^[0-9a-f]{64}$ ]] || {
+      echo 'ERROR: proof backups require a proof ID and marker SHA-256' >&2
+      return 2
+    }
+    proof_annotations="    odf-cbt-validator/proof-id: $proof_id
+    odf-cbt-validator/marker-sha256: $marker_sha"
+  fi
+  assert_backup_inputs "$vm" || return
+  oc delete virtualmachinebackup "$name" -n "$NAMESPACE" --ignore-not-found --wait=true --timeout="${TIMEOUT}s" || return
+  [[ $force_full == true ]] && force_full_yaml='  forceFullBackup: true'
+  cat <<EOF | oc apply -f - >/dev/null || return
 apiVersion: backup.kubevirt.io/v1alpha1
 kind: VirtualMachineBackup
-metadata: {name: $name, namespace: $NAMESPACE}
+metadata:
+  name: $name
+  namespace: $NAMESPACE
+  labels:
+    app.kubernetes.io/name: odf-cbt-validator
+    app.kubernetes.io/managed-by: kube-burner
+    odf-cbt-validator/test-id: $test_id
+  annotations:
+    odf-cbt-validator/source-vm-uid: $(oc get vm "$vm" -n "$NAMESPACE" -o jsonpath='{.metadata.uid}')
+$proof_annotations
 spec:
   source: {apiGroup: backup.kubevirt.io, kind: VirtualMachineBackupTracker, name: $tracker}
   mode: Push
   pvcName: $pvc
+$force_full_yaml
   skipQuiesce: true
 EOF
+  uid=$(oc get virtualmachinebackup "$name" -n "$NAMESPACE" -o json |
+    jq -er --arg vm "$vm" --arg tracker "$tracker" --arg pvc "$pvc" --arg test_id "$test_id" \
+      --arg proof "$proof_id" --arg marker "$marker_sha" '
+      select(.metadata.labels["odf-cbt-validator/test-id"] == $test_id) |
+      select(.spec.source.apiGroup == "backup.kubevirt.io" and .spec.source.kind == "VirtualMachineBackupTracker" and .spec.source.name == $tracker) |
+      select(.spec.mode == "Push" and .spec.pvcName == $pvc) |
+      select(.metadata.annotations["odf-cbt-validator/source-vm-uid"] != null) |
+      select(
+        ($proof == "" and $marker == "") or
+        (.metadata.annotations["odf-cbt-validator/proof-id"] == $proof and
+         .metadata.annotations["odf-cbt-validator/marker-sha256"] == $marker)
+      ) |
+      .metadata.uid
+    ') || { echo "ERROR: VirtualMachineBackup/$name does not match the requested source, PVC, test identity, or proof identity" >&2; return 1; }
+  [[ -n $uid ]] || { echo "ERROR: VirtualMachineBackup/$name has no UID" >&2; return 1; }
+  printf '%s\n' "$uid"
+}
+backup_one() {
+  local vm name proof_id marker_sha tracker checkpoint t0 baseline uid wait_rc=0
+  vm=$1; name=$2; proof_id=${3:-}; marker_sha=${4:-}; tracker="$vm-tracker"
+  checkpoint=$(tracker_checkpoint_name "$tracker")
+  [[ -z $checkpoint ]] || { echo "ERROR: full backup already exists for $vm; use cbt-backup or recreate density" >&2; return 1; }
+  t0=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  baseline=$(mktemp) || return
+  write_backup_baseline "$vm" "$tracker" "$baseline" || { rm -f "$baseline"; return 1; }
+  uid=$(create_backup_request "$vm" "$name" false "$proof_id" "$marker_sha") || { rm -f "$baseline"; return 1; }
+  if [[ -n $proof_id ]]; then
+    proof_manifest_record_full_request "$vm" "$proof_id" "$uid" || { rm -f "$baseline"; return 1; }
+  fi
   wait_backup "$vm" "$name" || wait_rc=$?
   collect_backup_diagnostics "$vm" "$name" "$t0" "$baseline"
   rm -f "$baseline"
   ((wait_rc == 0)) || return "$wait_rc"
-  cbt_backup_evidence "$vm" "$name" Full
+  cbt_backup_evidence "$vm" "$name" Full "$uid"
 }
 cbt_one() {
-  local vm=$1 name=$2 tracker="$vm-tracker" pvc="$vm-backup-output"
-  local before t0 baseline wait_rc=0
-  assert_owned_namespace || return 1
-  oc get virtualmachinebackup "$vm-full" -n "$NAMESPACE" >/dev/null
+  local vm name proof_id marker_sha tracker before after t0 baseline uid wait_rc=0
+  vm=$1; name=$2; proof_id=${3:-}; marker_sha=${4:-}; tracker="$vm-tracker"
+  assert_backup_inputs "$vm" || return
+  oc get virtualmachinebackup "$vm-full" -n "$NAMESPACE" >/dev/null || return
   before=$(tracker_checkpoint_name "$tracker")
-  [[ -n $before ]] || { echo "no full checkpoint for $vm"; return 1; }
-  oc delete virtualmachinebackup "$name" -n "$NAMESPACE" --ignore-not-found --wait=true --timeout="${TIMEOUT}s"
+  [[ -n $before ]] || { echo "ERROR: no full checkpoint for $vm" >&2; return 1; }
   t0=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  baseline=$(mktemp)
-  write_backup_baseline "$vm" "$tracker" "$baseline"
-  cat <<EOF | oc apply -f -
-apiVersion: backup.kubevirt.io/v1alpha1
-kind: VirtualMachineBackup
-metadata: {name: $name, namespace: $NAMESPACE}
-spec:
-  source: {apiGroup: backup.kubevirt.io, kind: VirtualMachineBackupTracker, name: $tracker}
-  mode: Push
-  pvcName: $pvc
-  skipQuiesce: true
-EOF
+  baseline=$(mktemp) || return
+  write_backup_baseline "$vm" "$tracker" "$baseline" || { rm -f "$baseline"; return 1; }
+  uid=$(create_backup_request "$vm" "$name" false "$proof_id" "$marker_sha") || { rm -f "$baseline"; return 1; }
+  if [[ -n $proof_id ]]; then
+    proof_manifest_record_incremental_request "$vm" "$proof_id" "$uid" || { rm -f "$baseline"; return 1; }
+  fi
   wait_backup "$vm" "$name" || wait_rc=$?
   collect_backup_diagnostics "$vm" "$name" "$t0" "$baseline"
   rm -f "$baseline"
   ((wait_rc == 0)) || return "$wait_rc"
-  cbt_backup_evidence "$vm" "$name" Incremental
+  after=$(tracker_checkpoint_name "$tracker")
+  [[ -n $after && $after != "$before" ]] || {
+    echo "ERROR: tracker/$tracker did not advance after Incremental backup (before=$before after=${after:-empty})" >&2
+    return 1
+  }
+  cbt_backup_evidence "$vm" "$name" Incremental "$uid"
+}
+proof_backup_one() {
+  local vm tracker proof_id baseline_sha marker_json manifest_path rc=0
+  vm=$1; tracker="$vm-tracker"; proof_id=$test_id
+  assert_backup_inputs "$vm" || return
+  [[ -z $(tracker_checkpoint_name "$tracker") ]] || {
+    echo "ERROR: full backup already exists for $vm; run make backup-reset first" >&2
+    return 1
+  }
+  manifest_path=$(proof_manifest_path "$vm")
+  if [[ -e $manifest_path ]] && ! jq -e '.state == "invalidated"' "$manifest_path" >/dev/null 2>&1; then
+    echo "ERROR: active proof manifest already exists for $vm; run make backup-reset first" >&2
+    return 1
+  fi
+  ensure_proof_marker "$vm" || return
+  baseline_sha=$(proof_marker_append "$vm" "$proof_id" baseline) || return
+  marker_json=$(proof_marker_metadata "$vm") || return
+  [[ $(jq -r '.sha256' <<<"$marker_json") == "$baseline_sha" ]] || {
+    echo "ERROR: proof marker changed while recording the Full baseline for $vm" >&2
+    return 1
+  }
+  proof_manifest_create "$vm" "$proof_id" "$marker_json" || return
+  backup_one "$vm" "$vm-full" "$proof_id" "$baseline_sha" || rc=$?
+  ((rc == 0)) || return "$rc"
+  proof_manifest_set_state "$vm" "$proof_id" full-requested full-complete
+}
+proof_cbt_one() {
+  local vm=$1 manifest proof_id baseline_sha full_uid full_test incremental_sha rc=0
+  assert_backup_inputs "$vm" || return
+  manifest=$(proof_manifest_for_vm "$vm") || return
+  jq -e '.state == "full-complete"' <<<"$manifest" >/dev/null || {
+    echo "ERROR: proof manifest for $vm is not ready for an Incremental backup; run make backup or make backup-reset" >&2
+    return 1
+  }
+  proof_id=$(jq -er '.proofId' <<<"$manifest") || return
+  baseline_sha=$(jq -er '.marker.baselineSha256' <<<"$manifest") || return
+  full_uid=$(jq -er '.full.uid' <<<"$manifest") || return
+  full_test=$(jq -er '.full.testId' <<<"$manifest") || return
+  assert_proof_vmb "$vm" "$vm-full" "$full_uid" "$full_test" "$proof_id" "$baseline_sha" || return
+  incremental_sha=$(proof_marker_append "$vm" "$proof_id" incremental) || return
+  [[ $incremental_sha != "$baseline_sha" ]] || {
+    echo "ERROR: Incremental proof marker hash did not change for $vm" >&2
+    return 1
+  }
+  proof_manifest_record_incremental "$vm" "$proof_id" "$incremental_sha" || return
+  cbt_one "$vm" "$vm-incremental" "$proof_id" "$incremental_sha" || rc=$?
+  ((rc == 0)) || return "$rc"
+  proof_manifest_set_state "$vm" "$proof_id" incremental-requested incremental-complete
 }
 backup_reset_one() {
   # Clear Push-mode backup artifacts for one VM so a fresh Full can run again.
   # Keeps the VM, data PVC, guest files, and live CBT overlay untouched.
   local vm=$1
   local tracker="$vm-tracker" pvc="$vm-backup-output"
-  assert_owned_namespace || return 1
+  assert_owned_namespace || return
+  assert_owned_vm "$vm" || return
   log INFO RESET "Clearing backups/tracker/backup-output for $vm"
   oc delete virtualmachinebackup "$vm-full" "$vm-incremental" -n "$NAMESPACE" \
-    --ignore-not-found --wait=true --timeout="${TIMEOUT}s"
+    --ignore-not-found --wait=true --timeout="${TIMEOUT}s" || return
   oc delete virtualmachinebackuptracker "$tracker" -n "$NAMESPACE" \
-    --ignore-not-found --wait=true --timeout="${TIMEOUT}s"
-  oc delete pvc "$pvc" -n "$NAMESPACE" --ignore-not-found --wait=true --timeout="${TIMEOUT}s"
-  cat <<EOF | oc apply -f -
+    --ignore-not-found --wait=true --timeout="${TIMEOUT}s" || return
+  oc delete pvc "$pvc" -n "$NAMESPACE" --ignore-not-found --wait=true --timeout="${TIMEOUT}s" || return
+  cat <<EOF | oc apply -f - >/dev/null || return
 apiVersion: backup.kubevirt.io/v1alpha1
 kind: VirtualMachineBackupTracker
 metadata:
@@ -445,9 +817,10 @@ spec:
     requests: {storage: $BACKUP_SIZE}
   storageClassName: $BACKUP_STORAGE_CLASS
 EOF
-  oc wait --for=jsonpath='{.status.phase}'=Bound pvc/"$pvc" -n "$NAMESPACE" --timeout="${TIMEOUT}s"
-  oc get virtualmachinebackuptracker "$tracker" -n "$NAMESPACE" >/dev/null
-  log INFO RESET "Reset complete for $vm (tracker+backup-output recreated)"
+  oc wait --for=jsonpath='{.status.phase}'=Bound pvc/"$pvc" -n "$NAMESPACE" --timeout="${TIMEOUT}s" || return
+  assert_backup_inputs "$vm" || return
+  proof_manifest_invalidate "$vm" || return
+  log INFO RESET "Reset complete for $vm (tracker+backup-output recreated; proof manifest invalidated)"
 }
 backup_reset_selected() {
   local vm i=0 total
@@ -466,10 +839,9 @@ backup_reset_selected() {
   ((failed==0 && inconclusive==0)) && finish_report 0 || finish_report 1
 }
 cbt_diagnostics_selected() {
-  # Ad-hoc forensic dump against existing Full and/or Incremental VMBs.
   local vm i=0 total name collected
-  parse_selection "$@"
-  start_report cbt-diagnostics
+  parse_selection "$@" || return
+  start_report cbt-diagnostics || return
   total=${#selected[@]}
   for vm in "${selected[@]}"; do
     ((i+=1))
@@ -493,39 +865,41 @@ cbt_diagnostics_selected() {
 }
 run_selected() {
   local action=$1; shift
-  local vm i=0 total rc
-  parse_selection "$@"
-  start_report "$action"
+  local vm i=0 total rc locked
+  parse_selection "$@" || return
+  start_report "$action" || return
   total=${#selected[@]}
   for vm in "${selected[@]}"; do
     ((i+=1))
     log INFO TEST "[$i/$total] $action $vm"
     rc=0
-    if [[ $action == backup ]]; then
-      backup_one "$vm" "$vm-full" || rc=$?
-      if ((rc == 0)); then record "$vm" PASS 'Full backup completed'
-      elif ((rc == 2)); then record "$vm" INCONCLUSIVE 'Full backup evidence could not be inspected'
-      else record "$vm" FAIL 'Full backup failed'; fi
-    elif [[ $action == cbt-backup ]]; then
-      sleep "$CBT_CHANGE_WAIT"
-      cbt_one "$vm" "$vm-incremental" || rc=$?
-      if ((rc == 0)); then record "$vm" PASS 'Incremental backup completed'
-      elif ((rc == 2)); then record "$vm" INCONCLUSIVE 'Incremental backup evidence could not be inspected'
-      else record "$vm" FAIL 'Incremental backup failed'; fi
-    else
+    locked=0
+    acquire_vm_lock "$vm" && locked=1 || rc=$?
+    if ((rc == 0)); then wait_for_live_workload "$vm" || rc=$?; fi
+    if ((rc == 0)) && [[ $action == backup ]]; then
+      proof_backup_one "$vm" || rc=$?
+    elif ((rc == 0)) && [[ $action == cbt-backup ]]; then
+      proof_cbt_one "$vm" || rc=$?
+    elif ((rc == 0)); then
       verify_one "$vm" || rc=$?
-      if ((rc == 0)); then record "$vm" PASS 'VM, backup and guest checks passed'
-      elif ((rc == 2)); then record "$vm" INCONCLUSIVE 'Verification incomplete: evidence could not be inspected'
-      else record "$vm" FAIL 'Verification failed'; fi
+    fi
+    if ((locked == 1)); then release_vm_lock "$vm" || rc=$?; fi
+    if ((rc == 0)); then
+      case "$action" in
+        backup) record "$vm" INCONCLUSIVE 'Full artifact is structurally verified; proof manifest recorded; run cbt-backup then verify-cbt for restore-hash proof' ;;
+        cbt-backup) record "$vm" INCONCLUSIVE 'Incremental artifact is structurally verified; run verify-cbt for restore-hash proof' ;;
+        *) record "$vm" INCONCLUSIVE 'Control-plane and artifact evidence passed; run verify-cbt for restore-hash proof' ;;
+      esac
+    elif ((rc == 2)); then
+      record "$vm" INCONCLUSIVE 'Verification incomplete: physical evidence could not be inspected'
+    else
+      record "$vm" FAIL "$action failed"
     fi
   done
   ((failed==0 && inconclusive==0)) && finish_report 0 || finish_report 1
 }
 guest_check() {
   # Prints max(seq) on success to stdout; returns nonzero on failure.
-  # Integrity + digest/sequence run in one Python process with a bounded
-  # busy_timeout so a failed integrity_check cannot be swallowed by a later
-  # successful query, and transient writer locks do not false-fail verify.
   local vm=$1 output max_seq
   [[ -n $SSH_KEY ]] || return 1
   output=$(guest_ssh "$vm" \
@@ -539,29 +913,106 @@ r = c.execute('select seq, payload, digest from records order by seq').fetchall(
 assert r and [x[0] for x in r] == list(range(1, len(r) + 1))
 assert all(hashlib.sha256(x[1].encode()).hexdigest() == x[2] for x in r)
 print('GUEST_SEQ=' + str(r[-1][0]))
-\"") || return 1
+  \"") || return 1
   max_seq=$(grep -Eo 'GUEST_SEQ=[0-9]+' <<<"$output" | tail -1 | cut -d= -f2)
-  [[ -n $max_seq ]] || return 1
+  [[ $max_seq =~ ^[1-9][0-9]*$ ]] || return 1
   printf '%s\n' "$max_seq"
+}
+wait_for_live_workload() {
+  local vm=$1 deadline=$((SECONDS + TIMEOUT))
+  oc wait --for=jsonpath='{.status.ready}'=true vm/"$vm" -n "$NAMESPACE" --timeout="${TIMEOUT}s" || return
+  oc wait --for=jsonpath='{.status.phase}'=Running vmi/"$vm" -n "$NAMESPACE" --timeout="${TIMEOUT}s" || return
+  oc get vm "$vm" -n "$NAMESPACE" -o json | jq -e '.status.changedBlockTracking.state=="Enabled"' >/dev/null || return
+  assert_backup_inputs "$vm" || return
+  wait_for_proof_guest_ssh "$vm" || return
+  wait_for_proof_guest_data "$vm" || return
+  while ((SECONDS < deadline)); do
+    if proof_guest_command "$vm" 'sudo -n systemctl is-active --quiet vm-validator.service vm-write-stress.service' &&
+       guest_check "$vm" >/dev/null; then
+      return 0
+    fi
+    sleep 5
+  done
+  echo "ERROR: guest workload did not become healthy on $vm within ${TIMEOUT}s" >&2
+  return 1
 }
 verify_one() {
   local vm=$1 seq1 seq2
-  oc wait --for=jsonpath='{.status.ready}'=true vm/"$vm" -n "$NAMESPACE" --timeout="${TIMEOUT}s"
-  oc wait --for=jsonpath='{.status.phase}'=Running vmi/"$vm" -n "$NAMESPACE" --timeout="${TIMEOUT}s"
-  oc get vm "$vm" -n "$NAMESPACE" -o json | jq -e '.status.changedBlockTracking.state=="Enabled"' >/dev/null
-  oc get pvc "$vm-data" "$vm-backup-output" -n "$NAMESPACE" -o json | jq -e '[.items[].status.phase]|all(.=="Bound")' >/dev/null
-  wait_backup "$vm" "$vm-full"
+  wait_for_live_workload "$vm" || return
+  wait_backup "$vm" "$vm-full" || return
   cbt_backup_evidence "$vm" "$vm-full" Full || return $?
-  wait_backup "$vm" "$vm-incremental"
+  wait_backup "$vm" "$vm-incremental" || return
   cbt_backup_evidence "$vm" "$vm-incremental" Incremental || return $?
-  seq1=$(guest_check "$vm") || return 1
+  seq1=$(guest_check "$vm") || return
   sleep 2
-  seq2=$(guest_check "$vm") || return 1
+  seq2=$(guest_check "$vm") || return
   ((seq2 > seq1)) || {
     echo "ERROR: guest sequence did not increase across checks (seq1=$seq1 seq2=$seq2)" >&2
     return 1
   }
   log INFO VALIDATE "Guest workload advanced: seq $seq1 → $seq2"
+}
+verify_cbt_one() {
+  local vm=$1 manifest proof_id marker_path baseline_sha expected_sha tracker_checkpoint
+  local full_uid full_test inc_uid inc_test restored_hash
+  wait_for_live_workload "$vm" || return
+  manifest=$(proof_manifest_for_vm "$vm") || return
+  jq -e '(.state == "incremental-complete" or .state == "verified")' <<<"$manifest" >/dev/null || {
+    echo "ERROR: proof manifest for $vm is not ready for restore verification" >&2
+    return 1
+  }
+  proof_id=$(jq -er '.proofId' <<<"$manifest") || return
+  marker_path=$(jq -er '.marker.path' <<<"$manifest") || return
+  baseline_sha=$(jq -er '.marker.baselineSha256' <<<"$manifest") || return
+  expected_sha=$(jq -er '.incremental.expectedRestoreSha256' <<<"$manifest") || return
+  full_uid=$(jq -er '.full.uid' <<<"$manifest") || return
+  full_test=$(jq -er '.full.testId' <<<"$manifest") || return
+  inc_uid=$(jq -er '.incremental.uid' <<<"$manifest") || return
+  inc_test=$(jq -er '.incremental.testId' <<<"$manifest") || return
+  assert_proof_vmb "$vm" "$vm-full" "$full_uid" "$full_test" "$proof_id" "$baseline_sha" || return
+  assert_proof_vmb "$vm" "$vm-incremental" "$inc_uid" "$inc_test" "$proof_id" "$expected_sha" || return
+  wait_backup "$vm" "$vm-full" || return
+  wait_backup "$vm" "$vm-incremental" || return
+  tracker_checkpoint=$(tracker_checkpoint_name "$vm-tracker")
+  collect_backup_diagnostics "$vm" "$vm-full" ""
+  collect_backup_diagnostics "$vm" "$vm-incremental" ""
+  cbt_backup_evidence "$vm" "$vm-full" Full "$full_uid" "$full_test" || return $?
+  cbt_backup_evidence "$vm" "$vm-incremental" Incremental "$inc_uid" "$inc_test" || return $?
+  restored_hash=$(restore_chain_and_verify_hash "$vm" "$marker_path" "$expected_sha") || return
+  [[ $restored_hash == "$expected_sha" ]] || {
+    echo "ERROR: restored proof marker hash does not match the recorded Incremental hash" >&2
+    return 1
+  }
+  proof_manifest_mark_verified "$vm" "$proof_id" "$restored_hash" || return
+  mkdir -p "$run_dir/evidence" || return
+  jq -n --arg vm "$vm" --arg proof "$proof_id" --arg marker "$marker_path" \
+    --arg baseline "$baseline_sha" --arg expected "$expected_sha" --arg restored "$restored_hash" \
+    --arg full_uid "$full_uid" --arg inc_uid "$inc_uid" --arg checkpoint "$tracker_checkpoint" \
+    '{vm:$vm,proofId:$proof,markerPath:$marker,baselineSha256:$baseline,expectedRestoreSha256:$expected,restoredSha256:$restored,fullVmbUid:$full_uid,incrementalVmbUid:$inc_uid,trackerLatestCheckpoint:$checkpoint,match:($expected == $restored),status:"PASS",message:"Control-plane checks, qcow2 evidence, and restored marker hash passed"}' \
+    >"$run_dir/evidence/$vm-verify-cbt.json"
+}
+verify_cbt_selected() {
+  local vm i=0 total rc locked
+  parse_selection "$@" || return
+  start_report verify-cbt || return
+  total=${#selected[@]}
+  for vm in "${selected[@]}"; do
+    ((i+=1))
+    log INFO TEST "[$i/$total] verify-cbt $vm"
+    rc=0
+    locked=0
+    acquire_vm_lock "$vm" && locked=1 || rc=$?
+    if ((rc == 0)); then verify_cbt_one "$vm" || rc=$?; fi
+    if ((locked == 1)); then release_vm_lock "$vm" || rc=$?; fi
+    if ((rc == 0)); then
+      record "$vm" PASS 'Control-plane, qcow2 artifact, and restore-hash verification passed'
+    elif ((rc == 2)); then
+      record "$vm" INCONCLUSIVE 'verify-cbt could not inspect physical qcow2 evidence'
+    else
+      record "$vm" FAIL 'verify-cbt failed'
+    fi
+  done
+  ((failed==0 && inconclusive==0)) && finish_report 0 || finish_report 1
 }
 status_selected() {
   if (($#==0)); then set -- --all; fi
@@ -637,32 +1088,21 @@ wait_for_proof_guest_data() {
   echo "Waiting for /data mount on $vm" >&2
   while ((SECONDS < deadline)); do
     if output=$(proof_guest_command "$vm" \
-      'sudo -n sh -c "mountpoint -q /data && mkdir -p /data/vm-validator && echo CBT_PROOF_DATA_READY"' 2>&1) &&
+      'sudo -n sh -c "mountpoint -q /data && test \"$(findmnt -n -o SOURCE /data)\" = /dev/vdc && mkdir -p /data/vm-validator && echo CBT_PROOF_DATA_READY"' 2>&1) &&
        [[ $output == *CBT_PROOF_DATA_READY* ]]; then
       echo "Guest /data ready: $vm" >&2
       return 0
     fi
     sleep 5
   done
-  echo "ERROR: guest /data did not become ready in ${TIMEOUT}s: $output" >&2
+  echo "ERROR: guest /data was not mounted from /dev/vdc within ${TIMEOUT}s: $output" >&2
   return 1
 }
 backup_force_full_one() {
-  local vm=$1 name=$2 tracker="$1-tracker" pvc="$1-backup-output"
-  assert_owned_namespace || return 1
-  oc delete virtualmachinebackup "$name" -n "$NAMESPACE" --ignore-not-found --wait=true --timeout="${TIMEOUT}s"
-  cat <<EOF | oc apply -f -
-apiVersion: backup.kubevirt.io/v1alpha1
-kind: VirtualMachineBackup
-metadata: {name: $name, namespace: $NAMESPACE}
-spec:
-  source: {apiGroup: backup.kubevirt.io, kind: VirtualMachineBackupTracker, name: $tracker}
-  mode: Push
-  pvcName: $pvc
-  forceFullBackup: true
-  skipQuiesce: true
-EOF
-  wait_backup "$vm" "$name"
+  local vm=$1 name=$2 uid
+  uid=$(create_backup_request "$vm" "$name" true) || return
+  wait_backup "$vm" "$name" || return
+  cbt_backup_evidence "$vm" "$name" Full "$uid"
 }
 payload_data_bytes() {
   jq '[.[] | select(.data == true and .depth == 0) | .length] | add // 0'
@@ -694,14 +1134,18 @@ cbt_backup_evidence() {
   #
   # Exit codes from cbt-evidence-check.sh:
   #   0 = match, 1 = type mismatch, 2 = uninspectable (INCONCLUSIVE)
-  local vm=$1 name=$2 expected_type=$3
-  local evidence_dir=${run_dir:+$run_dir/evidence} evidence_json rc=0
-  [[ -n $evidence_dir ]] && mkdir -p "$evidence_dir"
-
-  evidence_json=$("$ROOT/scripts/cbt-evidence-check.sh" \
-    --namespace "$NAMESPACE" --vm "$vm" --backup "$name" \
-    --expected "$expected_type" --backup-pvc "$vm-backup-output" \
-    --timeout "$TIMEOUT") || rc=$?
+  local vm=$1 name=$2 expected_type=$3 expected_uid=${4:-} expected_test_id=${5:-}
+  local evidence_dir=${run_dir:+$run_dir/evidence} evidence_json rc=0 args=()
+  if [[ -n $evidence_dir ]]; then mkdir -p "$evidence_dir" || return; fi
+  args=(
+    --namespace "$NAMESPACE" --vm "$vm" --backup "$name"
+    --expected "$expected_type" --backup-pvc "$vm-backup-output"
+    --timeout "$TIMEOUT"
+  )
+  if [[ -n $expected_uid ]]; then
+    args+=(--vmb-uid "$expected_uid" --test-id "${expected_test_id:-$test_id}")
+  fi
+  evidence_json=$("$ROOT/scripts/cbt-evidence-check.sh" "${args[@]}") || rc=$?
 
   [[ -n $evidence_dir && -n $evidence_json ]] && printf '%s\n' "$evidence_json" >"$evidence_dir/$name-evidence.json"
 
@@ -725,8 +1169,8 @@ cbt_evidence_selected() {
   for vm in "${selected[@]}"; do
     ((i+=1))
     log INFO TEST "[$i/$total] cbt-evidence $vm"
-    ok=PASS
-    msg='Full and Incremental artifacts match their physical CBT evidence'
+    ok=INCONCLUSIVE
+    msg='Artifacts match physical CBT evidence but have not passed restore-hash validation'
     rc=0
     cbt_backup_evidence "$vm" "$vm-full" Full || rc=$?
     if ((rc == 0)); then
@@ -957,14 +1401,15 @@ guest_marker_append() {
   }
   printf '%s\n' "$hash"
 }
-
 cleanup_restore_resources() {
   local vm=$1
-  local restore_vm="$vm-restored" restore_pvc="$vm-restore-data" converter="$vm-restore-converter"
-  oc delete vm "$restore_vm" -n "$NAMESPACE" --ignore-not-found --wait=true --timeout="${TIMEOUT}s" >/dev/null || true
-  oc delete secret "$restore_vm-userdata" -n "$NAMESPACE" --ignore-not-found --wait=true --timeout="${TIMEOUT}s" >/dev/null || true
-  oc delete pod "$converter" -n "$NAMESPACE" --ignore-not-found --wait=true --timeout="${TIMEOUT}s" >/dev/null || true
-  oc delete pvc "$restore_pvc" -n "$NAMESPACE" --ignore-not-found --wait=true --timeout="${TIMEOUT}s" >/dev/null || true
+  local restore_vm="$vm-restored" restore_pvc="$vm-restore-data" converter="$vm-restore-converter" rc=0
+  oc delete vm "$restore_vm" -n "$NAMESPACE" --ignore-not-found --wait=true --timeout="${TIMEOUT}s" >/dev/null || rc=1
+  oc delete secret "$restore_vm-userdata" -n "$NAMESPACE" --ignore-not-found --wait=true --timeout="${TIMEOUT}s" >/dev/null || rc=1
+  oc delete pod "$converter" -n "$NAMESPACE" --ignore-not-found --wait=true --timeout="${TIMEOUT}s" >/dev/null || rc=1
+  oc delete pvc "$restore_pvc" -n "$NAMESPACE" --ignore-not-found --wait=true --timeout="${TIMEOUT}s" >/dev/null || rc=1
+  ((rc == 0)) || echo "ERROR: restore cleanup failed for $vm; resources remain for diagnostics" >&2
+  return "$rc"
 }
 
 # Convert Full+Incremental qcow2 chain onto $vm-restore-data (rebase Inc onto Full).
@@ -1140,7 +1585,7 @@ EOF
 restore_chain_and_verify_hash() {
   local vm=$1 marker_path=$2 expected_hash=$3
   local restore_vm="$vm-restored" restored_hash
-  cleanup_restore_resources "$vm"
+  cleanup_restore_resources "$vm" || return
   convert_backup_chain_to_pvc "$vm" "$vm-full" "$vm-incremental" || return 1
   boot_restore_vm "$vm" || {
     cleanup_restore_resources "$vm"
@@ -1161,7 +1606,7 @@ restore_chain_and_verify_hash() {
     cleanup_restore_resources "$vm"
     return 1
   fi
-  cleanup_restore_resources "$vm"
+  cleanup_restore_resources "$vm" || return
   printf '%s\n' "$restored_hash"
 }
 
@@ -1233,15 +1678,18 @@ cbt_cycle_one() {
 }
 
 cbt_cycle_selected() {
-  local vm i=0 total rc
-  parse_selection "$@"
-  start_report cbt-cycle
+  local vm i=0 total rc locked
+  parse_selection "$@" || return
+  start_report cbt-cycle || return
   total=${#selected[@]}
   for vm in "${selected[@]}"; do
     ((i+=1))
     log INFO TEST "[$i/$total] cbt-cycle $vm"
     rc=0
-    cbt_cycle_one "$vm" || rc=$?
+    locked=0
+    acquire_vm_lock "$vm" && locked=1 || rc=$?
+    if ((rc == 0)); then cbt_cycle_one "$vm" || rc=$?; fi
+    if ((locked == 1)); then release_vm_lock "$vm" || rc=$?; fi
     if ((rc == 0)); then
       record "$vm" PASS 'Marker Full→append→Incremental→verify→restore-hash passed'
     elif ((rc == 2)); then
@@ -1337,4 +1785,30 @@ cbt_restore_proof() {
   proof_report_done=1
 }
 case "$COMMAND" in
- help) usage;; generate-keys) generate_keys;; check-prereqs) check_prereqs;; density-setup) [[ ${ARGS[0]:-} == --count ]] && VM_COUNT=${ARGS[1]}; density_setup;; density-status) density_status;; density-teardown) density_teardown "${ARGS[@]}";; discover-vms) discover "${ARGS[@]}";; backup|cbt-backup|verify) run_selected "$COMMAND" "${ARGS[@]}";; backup-reset) backup_reset_selected "${ARGS[@]}";; cbt-cycle) cbt_cycle_selected "${ARGS[@]}";; cbt-payload-proof) cbt_payload_proof;; cbt-restore-proof) cbt_restore_proof;; cbt-evidence) cbt_evidence_selected "${ARGS[@]}";; cbt-diagnostics) cbt_diagnostics_selected "${ARGS[@]}";; status) status_selected "${ARGS[@]}";; ssh) ssh_guest "${ARGS[@]}";; report) report;; list-reports) list_reports;; e2e) [[ ${ARGS[0]:-} == --count ]] && VM_COUNT=${ARGS[1]}; e2e "$VM_COUNT";; *) usage >&2; exit 2;; esac
+  help) usage ;;
+  report) report ;;
+  list-reports) list_reports ;;
+  *)
+    require_runtime_config || exit $?
+    case "$COMMAND" in
+      generate-keys) generate_keys ;;
+      check-prereqs) check_prereqs ;;
+      density-setup) [[ ${ARGS[0]:-} == --count ]] && VM_COUNT=${ARGS[1]}; density_setup ;;
+      density-status) density_status ;;
+      density-teardown) density_teardown "${ARGS[@]}" ;;
+      discover-vms) discover "${ARGS[@]}" ;;
+      backup|cbt-backup|verify) run_selected "$COMMAND" "${ARGS[@]}" ;;
+      backup-reset) backup_reset_selected "${ARGS[@]}" ;;
+      verify-cbt) verify_cbt_selected "${ARGS[@]}" ;;
+      cbt-cycle) cbt_cycle_selected "${ARGS[@]}" ;;
+      cbt-payload-proof) cbt_payload_proof ;;
+      cbt-restore-proof) cbt_restore_proof ;;
+      cbt-evidence) cbt_evidence_selected "${ARGS[@]}" ;;
+      cbt-diagnostics) cbt_diagnostics_selected "${ARGS[@]}" ;;
+      status) status_selected "${ARGS[@]}" ;;
+      ssh) ssh_guest "${ARGS[@]}" ;;
+      e2e) [[ ${ARGS[0]:-} == --count ]] && VM_COUNT=${ARGS[1]}; e2e "$VM_COUNT" ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    ;;
+esac

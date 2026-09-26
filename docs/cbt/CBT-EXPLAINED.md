@@ -376,16 +376,22 @@ KubeVirt's `VirtualMachineRestore` API restores **snapshots**, not these
 Push-mode CBT payloads. A production consumer (backup product) is expected
 to own retention, transport, encryption, and restore.
 
-This repo implements that outline as **`make cbt-cycle`** (density pool) and
-**`make cbt-restore-proof`** (disposable namespace): write a known file and
-record a baseline hash → Full backup → append and record a post-change hash →
-Incremental backup → convert Full+Incremental onto a new PVC (never
-mounting the source data/CBT PVCs) → boot a temporary restore VM → require
-the restored file hash to match the post-change hash. Density setup also
-seeds `/data/vm-validator/cbt-marker.bin` via cloud-init; `cbt-cycle`
-rewrites it each run. Re-run on the same pool with `make backup-reset` then
-`make cbt-cycle`. A green `verify` alone is still only proof of artifact
-*type*, not recoverability.
+This repo implements three online-safe restore acceptance paths:
+
+- **`make verify-cbt`** proves a normal density-pool sequence. `make backup`
+  atomically initializes `/data/vm-validator/hello.txt` if a legacy pool lacks
+  the cloud-init seed, then records a baseline SHA-256 in a host-side proof
+  manifest. `make cbt-backup` appends a unique record and saves the
+  post-append hash, then `make verify-cbt` binds that manifest to the exact
+  VM/PVC/VMB UIDs, restores the existing artifacts, and requires the restored
+  file hash to match.
+- **`make cbt-cycle`** and **`make cbt-restore-proof`** create their own
+  marker/write sequence in the density pool or a disposable namespace.
+
+All three paths convert only the Full and Incremental artifacts onto a new
+restore PVC, boot a temporary restore VM, and compare a guest-side hash.
+They never mount the source data or CBT-state PVCs. A green `verify` alone is
+still only proof of source health and artifact *type*, not recoverability.
 
 ---
 
@@ -496,27 +502,36 @@ Two things worth calling out about *why* this simple check is enough:
                                 a storage OSD / partition the network /
                                 reboot the node
   4. take an Incremental backup (§4), during or right after the chaos
-  5. VALIDATE — read the Incremental qcow2's header (§7) at any point
-     afterward, independent of whether the chaos already ended:
-       → PASS/FAIL decided by reading the backup qcow2's own header,
-         never VirtualMachineBackup.status or controller logs
-  6. record the result, repeat with different chaos scenarios
+  5. INSPECT — read the Incremental qcow2 header (§7) after chaos:
+       → artifact-shape evidence only; never call this backup success
+  6. RESTORE — rebuild the Full+Incremental chain and compare a content hash:
+       → this is the PASS/FAIL recovery gate
+  7. record both the artifact finding and restore outcome, repeat with
+     different chaos scenarios
 ```
 
-The evidence check in step 5 is deliberately separable from steps 2/4: you
-can run it inline right after each backup, and you can also re-run it
-standalone later, against backups that already exist, without redoing
-anything — which is exactly the shape a chaos experiment needs ("inject
-chaos, then verify what actually happened, without disturbing it further").
+The header check in step 5 is deliberately separable from backup creation:
+you can re-run it against existing artifacts without disturbing a VM. It is
+not a restore proof. A header says that a qcow2 is Full-shaped or
+CBT-Incremental-shaped; it cannot establish that every expected byte is
+recoverable. The validator therefore reports standalone header checks as
+**INCONCLUSIVE**.
+
+For the normal density-pool sequence, `make verify-cbt` is the recovery gate:
+it validates that the persistent host-side proof manifest still matches the
+current VM, backup-output PVC, and exact Full/Incremental VMB UIDs; collects
+CR/log diagnostics; checks both artifact headers; restores the chain into a
+new VM; and requires the restored `hello.txt` SHA-256 to equal the recorded
+post-Incremental hash. Only then does it report **PASS**.
 
 For post-mortem analysis of *why* a backup behaved a certain way (controller
 fallback, attach failures, handler crashes), `make backup` / `make cbt-backup`
-also write a forensic bundle under
+and `make verify-cbt` write a forensic bundle under
 `reports/run-*/diagnostics/<vm>/<backup-name>/` — CR YAML, filtered events,
 and virt-controller / virt-handler (VMI node) / virt-launcher logs for the
 backup window. Re-collect later with `make cbt-diagnostics`. Those logs are
 **forensics only**; they are never the Full-vs-Incremental pass/fail signal
-(§7). Disable with `CBT_DIAGNOSTICS=0`.
+(§7).
 
 ---
 

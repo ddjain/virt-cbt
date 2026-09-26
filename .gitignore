@@ -9,6 +9,8 @@ reports/
 kube-burner/rendered/
 kubeconfig
 kube-burner/kube-burner-*.log
+demo/
+showreel/
 
 # Local machine metadata
 .DS_Store
