@@ -22,7 +22,7 @@ endif
 # Quote VMS/SELECTOR so CSV values with spaces after commas stay one argv word.
 SELECTION_ARGS = $(if $(VMS),--vms '$(VMS)',$(if $(N),--count $(N),$(if $(n),--count $(n),$(if $(SELECTOR),--selector '$(SELECTOR)',$(if $(ALL),--all,)))))
 
-.PHONY: help init-config generate-keys check-prereqs density-setup density-status density-teardown discover-vms backup cbt-backup backup-reset cbt-cycle cbt-payload-proof cbt-restore-proof cbt-evidence cbt-diagnostics verify status ssh report list-reports e2e
+.PHONY: help init-config generate-keys check-prereqs density-setup density-status density-teardown discover-vms backup cbt-backup verify-cbt backup-reset cbt-cycle cbt-payload-proof cbt-restore-proof cbt-evidence cbt-diagnostics verify status ssh report list-reports e2e
 
 help:
 	@printf '%s\n' \
@@ -35,11 +35,12 @@ help:
 	  '  make density-status [SUMMARY=1]          Show owned VM pool' \
 	  '  make density-teardown [ALL=1 CONFIRM=1]  Delete config namespace, or all utility-owned (CONFIRM=1 required for ALL=1)' \
 	  '  make discover-vms [N=2|ALL=1]            List selected utility VMs' \
-	  '  make backup VMS=a,b|N=2|SELECTOR=k=v|ALL=1  Full backups' \
-	  '  make cbt-backup VMS=a,b|N=2|SELECTOR=k=v|ALL=1 Incremental backups' \
-	  '  make backup-reset VMS=a,b|N=2|SELECTOR=k=v|ALL=1  Clear backups/tracker/backup-output (keep VMs)' \
+	  '  make backup VMS=a,b|N=2|SELECTOR=k=v|ALL=1  Record proof baseline and take Full backup' \
+	  '  make cbt-backup VMS=a,b|N=2|SELECTOR=k=v|ALL=1  Append proof record and take Incremental backup' \
+	  '  make verify-cbt VMS=a,b|N=2|SELECTOR=k=v|ALL=1  Validate CRs+qcow2, restore chain, require proof hash' \
+	  '  make backup-reset VMS=a,b|N=2|SELECTOR=k=v|ALL=1  Clear backups/tracker/backup-output and invalidate proof' \
 	  '  make cbt-cycle VMS=a,b|N=2|SELECTOR=k=v|ALL=1  Marker→Full→append→Inc→verify→restore-hash' \
-	  '  make verify VMS=a,b|N=2|SELECTOR=k=v|ALL=1     Validate guests and backups' \
+	  '  make verify VMS=a,b|N=2|SELECTOR=k=v|ALL=1     Quick source and backup artifact check (no restore)' \
 	  '  make status [selection]                   Join VM, tracker and backup state' \
 	  '  make ssh VM=fedora-cbt-1 CMD="..."       Run a guest command' \
 	  '  make report                              Print newest JSON report' \
@@ -89,6 +90,8 @@ cbt-cycle:
 
 verify:
 	@$(SCRIPT) --config $(CONFIG) verify $(SELECTION_ARGS)
+verify-cbt:
+	@$(SCRIPT) --config $(CONFIG) verify-cbt $(SELECTION_ARGS)
 
 status:
 	@$(SCRIPT) --config $(CONFIG) status $(SELECTION_ARGS)
