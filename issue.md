@@ -4,9 +4,9 @@
 
 The new `make verify-cbt` target was exercised against the configured Blue cluster using an isolated namespace, `cbt-verify-1790405609`. The namespace was deleted after testing; the pre-existing `cbt-gcp-20260923` pool was left intact. No kubeconfig contents, private keys, or credentials are included here.
 
-The end-to-end Full → Incremental → restore-hash path passed after two branch defects were fixed in commit `78c0491` (`Fix CBT backup lock and guest check`). Two separate issues remain open: the local config key mismatch and the `backup-reset` command dispatch.
+The end-to-end Full → Incremental → restore-hash path passed after two branch defects were fixed in commit `78c0491` (`Fix CBT backup lock and guest check`). The two remaining findings below are resolved in this branch.
 
-## Open issues
+## Resolved findings
 
 ### 1. `config.env` contains an unsupported key
 
@@ -31,7 +31,7 @@ user 0.61
 sys 0.58
 ```
 
-**Status:** Open. Decide whether `BACKUP_CONCURRENCY` should be supported by the current script or removed from the local config.
+**Status:** Resolved. `BACKUP_CONCURRENCY` was retired in `ebabdb3` because the validator executes selected VMs serially. The loader now warns and ignores the stale setting so existing private configs can run; new configs must omit it.
 
 ### 2. `make backup-reset` is not dispatched by the script
 
@@ -50,7 +50,7 @@ sys 0.01
 
 The usage text lists `backup-reset`, but it is absent from the dispatch `case`. The command made no cluster changes: `oc` still showed `fedora-cbt-1-full`, `fedora-cbt-1-incremental`, the prior tracker checkpoint `fedora-cbt-1-incremental-2026-09-25_16-28-21`, and the unchanged backup-output PVC UID `edbf31df-6285-4c38-917c-f8a7a00a6f9a` in `cbt-gcp-20260923`.
 
-**Status:** Open. The end-to-end test used a new isolated namespace instead of resetting the existing pool.
+**Status:** Resolved. `backup-reset` is dispatched to `backup_reset_selected`, which retains the existing ownership safeguards before deleting or recreating resources.
 
 ## Fixed branch defects
 

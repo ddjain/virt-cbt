@@ -16,6 +16,7 @@ load_config() {
     value=${line#*=}
     case "$key" in
       KUBECONFIG|NAMESPACE|VM_COUNT|VM_PREFIX|VM_LABEL_SELECTOR|CONTAINER_IMAGE|VM_CPU|VM_MEMORY|DATA_SIZE|BACKUP_SIZE|DATA_STORAGE_CLASS|BACKUP_STORAGE_CLASS|TARGET_NODE|SSH_KEY|SSH_PUBLIC_KEY|SSH_USER|TIMEOUT|STABILIZE_TIMEOUT|CBT_CHANGE_WAIT|REPORTS_DIR|RESTORE_PROOF_BASE_MIB|RESTORE_PROOF_APPEND_MIB|CBT_DIAGNOSTICS|CBT_DIAGNOSTICS_DEPTH) ;;
+      BACKUP_CONCURRENCY) echo "WARNING: BACKUP_CONCURRENCY is obsolete and ignored; remove it from $CONFIG" >&2 ;;
       *) echo "ERROR: unsupported config key in $CONFIG: $key" >&2; return 2;;
     esac
     printf -v "$key" '%s' "$value"
@@ -1783,6 +1784,7 @@ case "$COMMAND" in
       density-teardown) density_teardown "${ARGS[@]}" ;;
       discover-vms) discover "${ARGS[@]}" ;;
       backup|cbt-backup|verify) run_selected "$COMMAND" "${ARGS[@]}" ;;
+      backup-reset) backup_reset_selected "${ARGS[@]}" ;;
       verify-cbt) verify_cbt_selected "${ARGS[@]}" ;;
       cbt-cycle) cbt_cycle_selected "${ARGS[@]}" ;;
       cbt-payload-proof) cbt_payload_proof ;;
