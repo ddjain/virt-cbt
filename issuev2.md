@@ -2,9 +2,9 @@
 
 ## Branch and scope
 
-Pulled the fast-forward update on `hardening/backup-validation-guards` to commit `91d03e5` (`Fix backup reset dispatch and config migration`). It adds the obsolete-`BACKUP_CONCURRENCY` warning/ignore behavior and dispatches `backup-reset` to `backup_reset_selected`.
+Pulled the branch to `936e29f` (`Initialize missing legacy proof markers`), following `91d03e5` (config migration and `backup-reset` dispatch). This update adds atomic initialization of the missing legacy proof file on the mounted data disk.
 
-Retested those changes plus the branch's persistent Full → Incremental → `verify-cbt` flow and the related cycle, quick-verify, evidence, diagnostics, status, and VM-selection paths. The Blue cluster prerequisites passed. The test namespace was isolated and removed; the original namespace remains active with its VM running and a verified cycle Full/Incremental pair.
+Retested those changes plus the branch's persistent Full → Incremental → `verify-cbt` flow and the related cycle, quick-verify, evidence, diagnostics, status, and VM-selection paths. The Blue cluster prerequisites passed. The earlier isolated namespace was deleted; the original namespace now has a verified persistent Full/Incremental pair and its VM remains running.
 
 ## Retest result
 
@@ -63,9 +63,33 @@ total 672852
 real 3.23
 ```
 
-A fresh VM created by the latest template completed the persistent backup/restore workflow. The old VM was not modified during the retest to synthesize `hello.txt`. After the failure, `cbt-cycle` successfully recreated and verified a Full/Incremental pair in the original namespace, so it was not left without backups.
+The earlier retest left the original guest unchanged. This retest after `936e29f` verified the initialization on that legacy guest, then completed Full, Incremental, and restore-hash verification.
 
-**Resolution:** `make backup` now atomically initializes the dedicated proof file on the mounted `/data` disk when a legacy pool lacks the cloud-init seed, logs that action, and never falls back to the container disk or mounts a source PVC from another pod.
+**Resolution:** `make backup` initializes the dedicated proof file on mounted `/data` if a legacy pool lacks the cloud-init seed, logs the action, and never falls back to the container disk. Verified end-to-end below.
+
+### Retest after commit `936e29f`
+
+The original `fedora-cbt-1` first reported `HELLO_MISSING`. After `make backup-reset`, `make backup` initialized the proof file on `/data`:
+
+```text
+[11:18:17] [INFO] [PROOF] Initialized missing recovery proof file at /data/vm-validator/hello.txt on fedora-cbt-1
+[11:18:42] [INFO] [BACKUP] Waiting for VirtualMachineBackup/fedora-cbt-1-full terminal (timeout=1200s)
+[11:30:29] [INFO] [BACKUP] VirtualMachineBackup/fedora-cbt-1-full reached Done/Complete
+CBT evidence: fedora-cbt-1-full is physically Full (backing=), allocated=3191603200B — matches expected Full
+```
+
+The guest file read through `sudo -n` returned `format=odf-cbt-proof-v1`, `guest_created_at=2026-09-26T11:18:14Z`, and the new baseline proof record. An unprivileged `cat` returned `Permission denied`; the validator uses `sudo`, and this did not block the workflow.
+
+`cbt-backup` then completed with physical Incremental evidence (`backingFile=/var/run/kubevirt-private/libvirt/qemu/cbt/datadisk.qcow2`). `verify-cbt` passed; `expectedRestoreSha256` and `restoredSha256` both equaled `13607ec0e1e12f820e06f2334e9b5eeb3e6cae2533a6ac9ff7ab11a2608577b9`.
+
+Independent `oc` checks after verification showed the VM Ready with CBT Enabled, the VMI Running and not Paused, both PVCs Bound, VMB UIDs/source VM UID matching the manifest, and the Incremental tracker checkpoint. The temporary restore VM, PVC, and restore-target pods were absent. The LLM judge returned **PASS**.
+
+`backup` and `cbt-backup` remained **INCONCLUSIVE** with `failed=0`, as designed before restore verification; `verify-cbt` supplied the recovery PASS.
+
+The proof file is created with restrictive permissions; unprivileged guest reads require `sudo`. No source data or CBT-state PVC was mounted into a second pod.
+
+**Retest reports:** `reports/run-cbt-20260926T111716Z-57582-17574-backup-reset/`, `reports/run-cbt-20260926T111744Z-57876-13072-backup/`, `reports/run-cbt-20260926T113322Z-67604-24570-cbt-backup/`, and `reports/run-cbt-20260926T114649Z-75281-26075-verify-cbt/`.
+
 
 ### LLM judge clarification
 
@@ -126,3 +150,19 @@ Measured with `/usr/bin/time -p` (`real`):
 | `make backup-reset N=1 CONFIG=<temporary config after teardown>` | 1.50 s | Failed selection because the isolated namespace had already been deleted |
 
 These two post-cleanup invocations made no cluster changes; they are retained here as timing records, not product failures.
+
+### Commit `936e29f` legacy-proof retest timings
+
+Measured with `/usr/bin/time -p` (`real`):
+
+| Command | Time | Result |
+|---|---:|---|
+| `make check-prereqs CONFIG=config.env` | 9.41 s | PASS; obsolete key warned and ignored |
+| `make density-status CONFIG=config.env` | 2.33 s | PASS; original VM healthy |
+| `make ssh` — confirm missing proof file | 3.20 s | `HELLO_MISSING` |
+| `make backup-reset N=1 CONFIG=config.env` | 20.30 s | PASS; previous Full/Incremental resources reset |
+| `make backup VMS=fedora-cbt-1 CONFIG=config.env` | 14:17.28 | INCONCLUSIVE; legacy proof initialized and physical Full verified |
+| `make ssh` — unprivileged proof-file read | 3.96 s | Permission denied without sudo; `sudo -n` read succeeded |
+| `make ssh` — `sudo -n cat` proof-file read | 3.14 s | PASS; format and baseline record present |
+| `make cbt-backup VMS=fedora-cbt-1 CONFIG=config.env` | 12:54.71 | INCONCLUSIVE; physical Incremental verified |
+| `make verify-cbt VMS=fedora-cbt-1 CONFIG=config.env` | 8:56.39 | PASS; restored hash matched |
