@@ -429,7 +429,9 @@ proof_manifest_invalidate() {
   mv -f "$tmp" "$path"
 }
 check_prereqs() {
-  for t in oc virtctl kube-burner jq; do need "$t" || return; done
+  local missing=0
+  for t in oc virtctl kube-burner jq; do need "$t" || missing=1; done
+  ((missing == 0)) || return 127
   [[ -r ${KUBECONFIG:-/dev/null} || -z ${KUBECONFIG:-} ]] || { echo "ERROR: kubeconfig is unreadable: $KUBECONFIG"; return 1; }
   oc get crd virtualmachines.kubevirt.io virtualmachinebackups.backup.kubevirt.io virtualmachinebackuptrackers.backup.kubevirt.io >/dev/null
   oc get storageclass "$DATA_STORAGE_CLASS" "$BACKUP_STORAGE_CLASS" >/dev/null
@@ -451,6 +453,10 @@ generate_keys() { [[ -n $SSH_KEY ]] || SSH_KEY="$ROOT/keys/cbt-validator"; mkdir
 render_job() { local out=$1; sed -e "s|REPLACE_NAMESPACE|$NAMESPACE|g" -e "s|REPLACE_REPLICAS|$VM_COUNT|g" -e "s|REPLACE_VM_PREFIX|$VM_PREFIX|g" -e "s|REPLACE_CONTAINER_IMAGE|$CONTAINER_IMAGE|g" -e "s|REPLACE_SSH_USER|$SSH_USER|g" -e "s|REPLACE_SSH_PUBLIC_KEY|$SSH_PUBLIC_KEY|g" -e "s|REPLACE_VM_CPU|$VM_CPU|g" -e "s|REPLACE_VM_MEMORY|$VM_MEMORY|g" -e "s|REPLACE_DATA_SIZE|$DATA_SIZE|g" -e "s|REPLACE_BACKUP_SIZE|$BACKUP_SIZE|g" -e "s|REPLACE_DATA_STORAGE_CLASS|$DATA_STORAGE_CLASS|g" -e "s|REPLACE_BACKUP_STORAGE_CLASS|$BACKUP_STORAGE_CLASS|g" -e "s|REPLACE_TARGET_NODE|$TARGET_NODE|g" -e "s|REPLACE_MARKER_BASE_MIB|$RESTORE_PROOF_BASE_MIB|g" "$ROOT/kube-burner/odf-cbt-density.yml" >"$out"; }
 density_setup() {
   [[ $VM_COUNT =~ ^[1-9][0-9]*$ ]] || { echo 'ERROR: VM_COUNT must be positive'; return 2; }
+  [[ -n $SSH_KEY && -r $SSH_KEY && -r "$SSH_KEY.pub" ]] || {
+    echo 'ERROR: SSH_KEY pair is required for density setup; run make generate-keys first' >&2
+    return 2
+  }
   local existing
   existing=$(oc get namespace "$NAMESPACE" -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}' 2>/dev/null || true)
   if oc get namespace "$NAMESPACE" >/dev/null 2>&1; then
@@ -1788,10 +1794,10 @@ case "$COMMAND" in
   help) usage ;;
   report) report ;;
   list-reports) list_reports ;;
+  generate-keys) generate_keys ;;
   *)
     require_runtime_config || exit $?
     case "$COMMAND" in
-      generate-keys) generate_keys ;;
       check-prereqs) check_prereqs ;;
       density-setup) [[ ${ARGS[0]:-} == --count ]] && VM_COUNT=${ARGS[1]}; density_setup ;;
       density-status) density_status ;;

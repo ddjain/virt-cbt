@@ -2,36 +2,61 @@
 
 The primary workflow is the Make/kube-burner utility at repository root. It creates only Fedora VMs, each with an ODF data PVC, backup-output PVC, CBT tracker, and deterministic guest workload.
 
-## Configuration
+## First run
+
+`README.md` is the canonical onboarding guide. The short path is:
 
 ```bash
+make bootstrap       # explicit local install of missing virtctl and kube-burner
 make init-config
 $EDITOR config.env
-# Set KUBECONFIG, DATA_STORAGE_CLASS, BACKUP_STORAGE_CLASS, SSH_KEY and SSH_PUBLIC_KEY.
+make generate-keys
+make doctor          # read-only aggregated configuration, cluster, and RBAC diagnosis
+make check-prereqs   # enforced by density-setup and e2e
 ```
 
-The default namespace is `cbt-demo`; for shared clusters use a unique namespace. `check-prereqs` requires `oc`, `virtctl`, `kube-burner`, and `jq`, then checks the VM/backup/tracker CRDs, ODF resources, storage classes, snapshot class, and that HyperConverged CBT is configured.
+`KUBECONFIG` must be an explicit readable file in `config.env`; the validator
+does not infer the configuration that `oc` might use by default. Set a unique
+`NAMESPACE` on shared clusters, ODF RBD-compatible
+`DATA_STORAGE_CLASS`/`BACKUP_STORAGE_CLASS`, and `SSH_KEY`. `SSH_PUBLIC_KEY`
+is derived from `SSH_KEY.pub`. `make bootstrap` writes only to `.tools/bin`,
+detects compatible releases internally, and verifies release checksums.
 
 ## Density and backups
 
 ```bash
-make check-prereqs
-make density-setup N=2
-make density-status
-make cbt-cycle N=2
+make density-setup N=1
+make density-status SUMMARY=1  # expect count=1, ready=1, cbtEnabled=1
+make cbt-cycle N=1
 make status ALL=1
 make report
 # Re-run without tearing down VMs:
-# make backup-reset N=2 && make cbt-cycle N=2
+# make backup-reset N=1 && make cbt-cycle N=1
 make density-teardown          # config NAMESPACE only
 # make density-teardown ALL=1 CONFIRM=1  # every utility-owned namespace
 ```
 
-`N=2` and `n=2` select the first two utility-owned VM names in natural/version order (1-indexed: `fedora-cbt-1`, `fedora-cbt-2` — not lexical `fedora-cbt-10`). The same selector must be used for Full, Incremental, and verify operations so they use the same trackers. Use `VMS=fedora-cbt-1,fedora-cbt-2` for an exact selection, `SELECTOR=some-label=value` for a label subset, or `ALL=1` for every managed VM. Selection is mandatory for backup and verification. Duplicate, missing, unowned, empty CSV members, zero, or over-sized selections fail. Make requires exactly one of `VMS` / `N` / `SELECTOR` / `ALL`.
+`N=2` and `n=2` select the first two utility-owned VM names in natural/version
+order (1-indexed: `fedora-cbt-1`, `fedora-cbt-2` — not lexical
+`fedora-cbt-10`). The same selector must be used for Full, Incremental, and
+verify operations so they use the same trackers. Use
+`VMS=fedora-cbt-1,fedora-cbt-2` for an exact selection,
+`SELECTOR=some-label=value` for a label subset, or `ALL=1` for every managed
+VM. Selection is mandatory for backup and verification. Duplicate, missing,
+unowned, empty CSV members, zero, or over-sized selections fail. Make requires
+exactly one of `VMS` / `N` / `SELECTOR` / `ALL`.
 
-`e2e N=2` performs `density-setup` then `cbt-cycle` for the first N VMs (marker rewrite → Full → append → Incremental → guest+qcow2 verify → restore-hash) while leaving the pool in place. Each VM uses `${vm}-backup-output` and `${vm}-tracker`. Backups and restore conversion run serially (the backup-output PVC is RWO). Reports are written below `REPORTS_DIR` with `summary.json`, `summary.txt`, `run.log`, and per-VM results (`PASS` / `FAIL` / `INCONCLUSIVE`).
+`e2e N=1` performs `density-setup` then `cbt-cycle` for the first VM
+(marker rewrite → Full → append → Incremental → guest+qcow2 verify →
+restore-hash) while leaving the pool in place. Each VM uses
+`${vm}-backup-output` and `${vm}-tracker`. Backups and restore conversion run
+serially (the backup-output PVC is RWO). Reports are written below
+`REPORTS_DIR` with `summary.json`, `summary.txt`, `run.log`, and per-VM
+results (`PASS` / `FAIL` / `INCONCLUSIVE`).
 
-`make backup-reset` clears Full/Incremental CRs and recreates the tracker plus backup-output PVC so another Full/`cbt-cycle` can run without `density-teardown`. It does not touch the VM or guest data.
+`make backup-reset` clears Full/Incremental CRs and recreates the tracker plus
+backup-output PVC so another Full/`cbt-cycle` can run without
+`density-teardown`. It does not touch the VM or guest data.
 
 ## Control-plane checklist (triage only)
 

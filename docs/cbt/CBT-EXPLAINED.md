@@ -7,6 +7,12 @@ prove it works, even under chaos", using the real Kubernetes/KubeVirt
 objects, `oc`/`kubectl`, and `qemu-img` commands you'd type by hand, with
 ASCII diagrams at each step.
 
+> **Repository workflow.** This explainer remains tool-neutral. For this
+> repository's executable workflow, begin with `make bootstrap`,
+> `make init-config`, `make doctor`, and `make check-prereqs` as described in
+> the [operator guide](CBT-TEST-GUIDE.md). `bootstrap` is an explicit
+> local-client installation step; `doctor` is read-only.
+
 ---
 
 ## 1. The problem: backups are slow if you copy everything every time

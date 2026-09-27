@@ -42,42 +42,73 @@ Every command below also writes a timestamped report to
 
 ## Prerequisites
 
-- `oc`, `virtctl`, `kube-burner`, `jq` on your `PATH`
-- A **bash 4+** (macOS ships bash 3.2 — `brew install bash` and make sure
-  `/opt/homebrew/bin` comes before `/bin` in `PATH`, or the scripts will
-  fail with `declare: -A: invalid option`)
-- An OpenShift cluster with OpenShift Virtualization and ODF installed, and
-  a `KUBECONFIG` pointing at it
-- SSH access to guests is required for `backup`, `cbt-backup`, `verify`, and
-  `verify-cbt` (`make generate-keys` creates a keypair for you)
+- An OpenShift cluster with OpenShift Virtualization and ODF installed.
+- `oc`, `jq`, **bash 4+**, `tar`, a SHA-256 utility, and either `curl` or
+  `wget` on `PATH`.
+- `virtctl` and `kube-burner` on `PATH`; `make bootstrap` can install those
+  two self-contained clients when they are missing.
+- SSH access to guests for `backup`, `cbt-backup`, `verify`, and
+  `verify-cbt`.
+
+`make bootstrap` is explicit: it installs only missing `virtctl` and
+`kube-burner` binaries under `.tools/bin`, verifies the release checksums,
+and never changes system directories or cluster configuration. It detects a
+compatible release artifact internally. When installing a missing client, pin
+an upstream release when your cluster policy requires it:
+
+```bash
+make bootstrap VIRTCTL_VERSION=vX.Y.Z KUBE_BURNER_VERSION=vX.Y.Z
+```
 
 ## Full end-to-end pipeline
 
-Run these in order. Each step tells you what it's doing, what it creates,
-and roughly how long it takes.
+Run these in order. The first run uses one VM to limit cluster consumption;
+increase `N` only after the workflow is understood.
+
+### 0. Bootstrap supported local clients
+
+```bash
+make bootstrap
+```
+
+Run `make doctor` after configuring the project. It is read-only and reports
+all detectable configuration, local-tool, cluster-prerequisite, and workflow
+RBAC failures in one pass.
 
 ### 1. Configure
 
 ```bash
-make init-config          # copies config.example.env → config.env if absent
-$EDITOR config.env        # set KUBECONFIG, NAMESPACE, storage classes, etc.
-make generate-keys        # creates keys/cbt-validator (+.pub) if missing;
-                           # copy the printed SSH_KEY path into config.env
-                           # if you didn't already set one
-make check-prereqs        # verifies oc/virtctl/kube-burner/jq exist, the
-                           # VirtualMachine/VirtualMachineBackup/
-                           # VirtualMachineBackupTracker CRDs are installed,
-                           # the configured storage classes exist, ODF's
-                           # StorageCluster/CephCluster are present, a
-                           # VolumeSnapshotClass exists, and CBT is enabled
-                           # in HyperConverged. Prints "Prerequisites OK" or
-                           # a specific error — nothing is created.
+make init-config
+$EDITOR config.env
 ```
+
+Set at least these values. `KUBECONFIG` must be an explicit readable file in
+`config.env`; the validator does not infer the default configuration used by
+`oc`. Use a unique namespace on a shared cluster. Choose ODF
+RBD-compatible storage classes; discover their names with `oc get
+storageclass`.
+
+```dotenv
+KUBECONFIG=/absolute/path/to/kubeconfig
+NAMESPACE=cbt-your-unique-name
+DATA_STORAGE_CLASS=your-odf-rbd-class
+BACKUP_STORAGE_CLASS=your-odf-rbd-class
+SSH_KEY=keys/cbt-validator
+```
+
+```bash
+make generate-keys  # creates SSH_KEY and SSH_KEY.pub when absent
+make doctor         # read-only aggregated diagnosis; creates nothing
+make check-prereqs  # enforced preflight used by density-setup and e2e
+```
+
+`SSH_PUBLIC_KEY` is derived from `SSH_KEY.pub`; leave it empty unless an
+explicit override is required.
 
 ### 2. Create the VM pool
 
 ```bash
-make density-setup N=2
+make density-setup N=1
 ```
 
 **What it does internally:** creates the namespace (if absent) and labels
@@ -92,15 +123,21 @@ stress services, and seeds `/data/vm-validator/cbt-marker.bin`
 (`RESTORE_PROOF_BASE_MIB`) plus `/data/vm-validator/hello.txt`. The latter
 records its guest creation time and is the small, dedicated recovery-proof
 file used by the normal Full → Incremental → restore flow.
-Setup then polls
-until all VMs report `status.ready=true` and
+Setup then polls until all VMs report `status.ready=true` and
 `status.changedBlockTracking.state=Enabled` (up to `STABILIZE_TIMEOUT`
 seconds).
 
 ```bash
 make density-status              # table of VM/VMI/PVC/tracker state
-make density-status SUMMARY=1    # {count, ready, cbtEnabled} JSON summary
+make density-status SUMMARY=1    # expect count=1, ready=1, cbtEnabled=1
 ```
+
+For the smallest end-to-end proof, run `make cbt-cycle N=1`. It performs the
+marker rewrite, Full backup, append, Incremental backup, artifact checks, and
+restore-hash proof. The individual phases below are useful when inspecting or
+debugging a specific stage. If pool setup fails, inspect
+`make density-status`; after confirming the configured namespace is
+disposable, run `make density-teardown` before retrying.
 
 ### 3. Take a baseline Full backup
 
@@ -225,7 +262,7 @@ StorageCluster/CephCluster status.
 
 ```bash
 make density-teardown          # config.env NAMESPACE only
-make density-teardown ALL=1    # every namespace labeled odf-cbt-validator
+make density-teardown ALL=1 CONFIRM=1    # every namespace labeled odf-cbt-validator
 ```
 
 Deletes utility-owned namespaces only (label
@@ -237,7 +274,7 @@ Refuses any namespace that lacks the ownership label.
 ### All-in-one
 
 ```bash
-make e2e N=2   # density-setup → cbt-cycle (marker→Full→append→Inc→verify→restore-hash)
+make e2e N=1   # density-setup → cbt-cycle (marker→Full→append→Inc→verify→restore-hash)
                # for the first N VMs, no teardown
 ```
 
