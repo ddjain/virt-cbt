@@ -41,9 +41,9 @@ set -euo pipefail
 #   1 — inspectable, but physical type does not match --expected
 #   2 — uninspectable (pod/artifact/qemu-img); treat as INCONCLUSIVE
 
-NAMESPACE='' VM='' BACKUP='' EXPECTED='' BACKUP_PVC='' TIMEOUT=${TIMEOUT:-300}
+NAMESPACE='' VM='' BACKUP='' EXPECTED='' BACKUP_PVC='' VMB_UID='' TEST_ID='' TIMEOUT=${TIMEOUT:-300}
 
-usage() { printf '%s\n' "Usage: $0 --namespace NS --vm VM --backup NAME --expected Full|Incremental [--backup-pvc PVC] [--timeout SECONDS]"; }
+usage() { printf '%s\n' "Usage: $0 --namespace NS --vm VM --backup NAME --expected Full|Incremental [--backup-pvc PVC] [--vmb-uid UID] [--test-id ID] [--timeout SECONDS]"; }
 
 emit_inconclusive() {
   local reason=$1
@@ -60,6 +60,8 @@ while (($#)); do
     --backup) BACKUP=${2:?}; shift 2 ;;
     --expected) EXPECTED=${2:?}; shift 2 ;;
     --backup-pvc) BACKUP_PVC=${2:?}; shift 2 ;;
+    --vmb-uid) VMB_UID=${2:?}; shift 2 ;;
+    --test-id) TEST_ID=${2:?}; shift 2 ;;
     --timeout) TIMEOUT=${2:?}; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
@@ -67,38 +69,40 @@ while (($#)); do
 done
 [[ -n $NAMESPACE && -n $VM && -n $BACKUP && -n $EXPECTED ]] || { usage >&2; exit 2; }
 [[ $EXPECTED == Full || $EXPECTED == Incremental ]] || { echo 'ERROR: --expected must be Full or Incremental' >&2; exit 2; }
+[[ $TIMEOUT =~ ^[1-9][0-9]*$ ]] || { echo 'ERROR: --timeout must be a positive integer' >&2; exit 2; }
 BACKUP_PVC=${BACKUP_PVC:-$VM-backup-output}
 command -v oc >/dev/null || { echo 'ERROR: oc is required' >&2; exit 127; }
-command -v jq >/dev/null || { echo 'ERROR: jq is required' >&2; exit 127; }
+command -v jq >/dev/null || { echo 'jq is required' >&2; exit 127; }
 
-pod="${BACKUP}-evidence"
+vmb_json=$(oc get virtualmachinebackup "$BACKUP" -n "$NAMESPACE" -o json 2>/dev/null) ||
+  emit_inconclusive "VirtualMachineBackup/$BACKUP cannot be read"
+if [[ -n $VMB_UID ]] && [[ $(jq -r '.metadata.uid // empty' <<<"$vmb_json") != "$VMB_UID" ]]; then
+  emit_inconclusive "VirtualMachineBackup/$BACKUP UID does not match the request that is being verified"
+fi
+if [[ -n $TEST_ID ]] && [[ $(jq -r '.metadata.labels["odf-cbt-validator/test-id"] // empty' <<<"$vmb_json") != "$TEST_ID" ]]; then
+  emit_inconclusive "VirtualMachineBackup/$BACKUP test identity does not match the request that is being verified"
+fi
+
+pod="${BACKUP}-evidence-$$"
 cleanup() { oc delete pod "$pod" -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
 image=$(oc get pods -n "$NAMESPACE" -o json 2>/dev/null | jq -r --arg prefix "virt-launcher-$VM-" \
   '([.items[] | select(.metadata.name | startswith($prefix)) | .spec.containers[] | select(.name=="compute") | .image][0] // empty)' 2>/dev/null) || true
-if [[ -z ${image:-} || $image == null ]]; then
-  image=$(oc get pods -n "$NAMESPACE" -o json 2>/dev/null | jq -r \
-    '([.items[] | select(.metadata.name | startswith("virt-launcher-")) | .spec.containers[] | select(.name=="compute") | .image][0] // empty)' 2>/dev/null) || true
-fi
-[[ -n ${image:-} && $image != null ]] || emit_inconclusive "no virt-launcher pod in namespace $NAMESPACE to source a qemu-img-capable image"
+[[ -n ${image:-} && $image != null ]] ||
+  emit_inconclusive "no virt-launcher pod for $VM in namespace $NAMESPACE to source a qemu-img-capable image"
 
-# Keep the inspector off the VM's current node: attaching the backup PVC on
-# the same node the VM's disks are already mapped on is what triggered a
-# live I/O error during testing (see safety note above). Best-effort only —
-# if the VM/launcher can't be found, proceed without the exclusion.
+# Never schedule the backup-PVC inspector on the active VMI node. This is a
+# safety invariant, not a best-effort preference.
 avoid_node=$(oc get vmi "$VM" -n "$NAMESPACE" -o jsonpath='{.status.nodeName}' 2>/dev/null || true)
-affinity=''
-if [[ -n $avoid_node ]]; then
-  affinity="  affinity:
+[[ -n $avoid_node ]] || emit_inconclusive "VMI/$VM has no node; cannot safely inspect the backup PVC"
+affinity="  affinity:
     nodeAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
         nodeSelectorTerms:
         - matchExpressions:
           - {key: kubernetes.io/hostname, operator: NotIn, values: [$avoid_node]}"
-fi
 
-oc delete pod "$pod" -n "$NAMESPACE" --ignore-not-found >/dev/null
 cat <<EOF | oc apply -f - >/dev/null
 apiVersion: v1
 kind: Pod
@@ -118,11 +122,9 @@ EOF
 oc wait --for=condition=Ready "pod/$pod" -n "$NAMESPACE" --timeout="${TIMEOUT}s" >/dev/null || \
   emit_inconclusive "evidence inspector pod for $BACKUP did not become Ready"
 
-# Require the artifact directory that matches this VMB's checkpointName.
-# Reusing the same VirtualMachineBackup name (delete + recreate) leaves older
-# checkpoint dirs on the backup PVC; picking "newest by sort" can attribute a
-# later Incremental to an earlier Full (or vice versa) — so we never fall back.
-checkpoint=$(oc get virtualmachinebackup "$BACKUP" -n "$NAMESPACE" -o jsonpath='{.status.checkpointName}' 2>/dev/null || true)
+# `checkpointName` is only an artifact locator. When supplied, VMB UID and
+# test identity above prove that this locator belongs to the request under test.
+checkpoint=$(jq -r '.status.checkpointName // empty' <<<"$vmb_json")
 [[ -n $checkpoint ]] || emit_inconclusive "VirtualMachineBackup/$BACKUP has no status.checkpointName; cannot locate artifact safely"
 path=$(oc exec -n "$NAMESPACE" "$pod" -c inspect -- sh -c \
   "test -f /proof/$VM/$checkpoint/${BACKUP}-datadisk.qcow2 && echo /proof/$VM/$checkpoint/${BACKUP}-datadisk.qcow2" 2>/dev/null) || true
@@ -176,8 +178,10 @@ fi
 # no backing file to open, so `qemu-img map` is safe to run.
 bytes=null
 if [[ $physical_type == Full ]]; then
-  map_out=$(qemu_img_retry map --output=json --force-share "$path") && \
-    bytes=$(jq '[.[] | select(.data == true and .depth == 0) | .length] | add // 0' <<<"$map_out")
+  map_out=$(qemu_img_retry map --output=json --force-share "$path") ||
+    emit_inconclusive "qemu-img map failed for Full artifact $path"
+  bytes=$(jq '[.[] | select(.data == true and .depth == 0) | .length] | add // 0' <<<"$map_out") ||
+    emit_inconclusive "qemu-img map output for Full artifact $path is invalid"
 fi
 
 match=false
@@ -185,7 +189,8 @@ match=false
 
 jq -n --arg vm "$VM" --arg name "$BACKUP" --arg expected "$EXPECTED" \
   --arg physical "$physical_type" --arg backing "$backing" --arg path "$path" \
+  --arg vmbUid "$(jq -r '.metadata.uid // empty' <<<"$vmb_json")" --arg testId "$TEST_ID" \
   --argjson bytes "$bytes" --argjson match "$match" \
-  '{vm:$vm,backup:$name,expectedType:$expected,physicalType:$physical,backingFile:$backing,artifactPath:$path,allocatedDataBytes:$bytes,match:$match,inspectable:true}'
+  '{vm:$vm,backup:$name,vmbUid:$vmbUid,testId:$testId,expectedType:$expected,physicalType:$physical,backingFile:$backing,artifactPath:$path,allocatedDataBytes:$bytes,match:$match,inspectable:true}'
 
 [[ $match == true ]]

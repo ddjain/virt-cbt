@@ -68,14 +68,14 @@ jq -n \
         else empty end) // "";
   def reported_type: ($vmb.status.type // "Unknown");
   def physical_type: ($evidence.physicalType // "Unknown");
-  # classification is decided from evidenceOk (physical qcow2 evidence) plus
-  # cluster health, never from reported_type/done/failed alone.
-  # inconclusive = could not measure (infra/API/inspect failure).
+  # A header can prove artifact shape, never override a known request
+  # failure. `Done` is a synchronization gate; physical evidence decides type.
   def classification:
-    if ($inspectable | not) then "inconclusive"
+    if failed then "failed"
+    elif ($inspectable | not) then "inconclusive"
+    elif (done | not) then "inconclusive"
     elif $evidenceOk and vmi_running then "pass"
-    elif (physical_type == "Full") and vmi_running and (failed | not) then "safe_full_fallback"
-    elif failed then "bounded_failure"
+    elif (physical_type == "Full") and vmi_running then "full_fallback"
     else "fail"
     end;
   {
@@ -94,14 +94,14 @@ jq -n \
     checkpoint: checkpoint,
     classification: classification,
     pass: (classification == "pass"),
-    accepted: (classification == "pass" or classification == "safe_full_fallback" or classification == "bounded_failure"),
-    score: (if classification == "pass" then 1 elif classification == "safe_full_fallback" then 0 elif classification == "bounded_failure" then 0 elif classification == "inconclusive" then 0 else -1 end)
+    accepted: (classification == "pass"),
+    score: (if classification == "pass" then 1 elif classification == "inconclusive" then 0 else -1 end)
   }
 ' | tee "$OUTPUT"
 
 classification=$(jq -r '.classification' "$OUTPUT")
 case "$classification" in
-  pass|safe_full_fallback|bounded_failure) exit 0 ;;
+  pass) exit 0 ;;
   inconclusive) exit 2 ;;
   *) exit 1 ;;
 esac

@@ -56,6 +56,7 @@ stringData:
       - bash -c 'if ! blkid /dev/vdc | grep -q TYPE; then mkfs.xfs -L data /dev/vdc; fi'
       - bash -c 'mount /data || mount /dev/vdc /data'
       - bash -c 'mountpoint -q /data && mkdir -p /data/vm-validator'
+      - bash -c 'mountpoint -q /data && { printf "format=odf-cbt-proof-v1\n"; printf "guest_created_at=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; } > /data/vm-validator/hello.txt && sync -f /data/vm-validator/hello.txt'
       - systemctl daemon-reload
       - systemctl enable --now vm-validator.service
 ---
